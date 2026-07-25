@@ -128,16 +128,57 @@ def test_progress_reaches_the_panel_and_cancel_stops_the_op(panel, qtbot):
     assert 0.0 < total < 100.0
 
 
-def test_a_failing_op_reports_rather_than_raises(panel, qtbot):
+def test_a_failing_op_reports_through_napari(panel, qtbot):
+    from napari.utils.notifications import notification_manager
+
     # No image layer exists, so scale gets None and fails in the worker.
     _choose(panel, "scale")
     assert next(w for w in panel._inputs.widgets if w.name == "image").value is None
 
-    with qtbot.waitSignal(panel.finished, timeout=300_000):
-        panel._start()
+    with notification_manager:  # Isolates and records this block's notices.
+        with qtbot.waitSignal(panel.finished, timeout=300_000):
+            panel._start()
+        notices = list(notification_manager.records)
 
-    assert [w.name for w in panel._results] == ["error"]
-    assert "TaskException" in panel._results[0].value
-    # The panel is usable again afterwards.
+    errors = [n for n in notices if n.severity == "error"]
+    assert len(errors) == 1
+    # The op failed in another process, and the notification carries that
+    # process's traceback -- which is the whole reason not to use a LineEdit.
+    message = str(errors[0].message)
+    assert "Task failed" in message
+    assert "toy.py" in message and "image * factor" in message
+    assert "unsupported operand type(s)" in message
+
+    # Nothing was written into the panel, and it is usable again.
+    assert len(panel._results) == 0
     assert panel._button.enabled
-    assert not panel._cancel.visible
+
+
+def test_build_output_drives_the_progress_bar(panel):
+    # Appose reports environment building through these callbacks. What pixi
+    # actually emits is stream chunks on stderr, success messages included.
+    panel._on_build_text("Resolving dependencies\n✔ The default environment\n")
+    assert panel._progress.label == "✔ The default environment"
+
+    # Only the tool download reports determinate progress.
+    panel._on_build_progress("Downloading pixi", 30, 100)
+    assert panel._progress.label == "Downloading pixi"
+    assert panel._progress.max == 100
+    assert panel._progress.value == 30
+
+
+def test_build_callbacks_are_registered_on_the_runner(panel):
+    assert panel._runner._build_progress
+    assert panel._runner._build_output
+    assert panel._runner._build_error
+
+
+def test_build_text_crosses_from_the_build_thread_to_the_gui(panel, qtbot):
+    import threading
+
+    # Environments are built inside run(), on the worker thread, so every
+    # build callback arrives off the GUI thread and has to be marshalled.
+    subscriber = panel._runner._build_error[0]
+    threading.Thread(target=subscriber, args=("✔ installed\n",)).start()
+
+    qtbot.waitUntil(lambda: panel._progress.label == "✔ installed", timeout=10_000)

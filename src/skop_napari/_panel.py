@@ -10,6 +10,7 @@ is what gets split up.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from magicgui.widgets import (
@@ -21,7 +22,9 @@ from magicgui.widgets import (
     PushButton,
 )
 from napari.layers import Layer
+from napari.utils.notifications import notification_manager
 from psygnal import Signal
+from superqt.utils import ensure_main_thread
 
 from skop import OpSpec, Runner, discover
 
@@ -33,6 +36,8 @@ from ._widget import Inputs, build_inputs
 _GENERIC = frozenset(
     {"out", "output", "result", "image", "labels", "points", "mask", "nuclei", "cells"}
 )
+
+_log = logging.getLogger("skop_napari")
 
 
 def _label_for(spec: OpSpec) -> str:
@@ -99,6 +104,17 @@ class OpsPanel(Container):
         self._button.changed.connect(self._start)
         self._cancel.changed.connect(self._stop)
 
+        # Building an environment happens inside run(), on the worker thread,
+        # and is the slowest part of a first run by a wide margin. These
+        # callbacks are the only way to show anything while it happens.
+        self._runner.subscribe_build_progress(
+            ensure_main_thread(self._on_build_progress)
+        )
+        self._runner.subscribe_build_output(ensure_main_thread(self._on_build_text))
+        # NB: not an error channel despite the name -- this is the build
+        # tool's stderr, where pixi writes all its status, success included.
+        self._runner.subscribe_build_error(ensure_main_thread(self._on_build_text))
+
         if self._by_label:
             self._select()
         else:
@@ -149,6 +165,9 @@ class OpsPanel(Container):
         self._cancel.visible = True
         self._progress.visible = True
         self._progress.max = 0  # Indeterminate until the op says otherwise.
+        # There is no "build started" event, and a first run can sit silent
+        # for a while before pixi says anything, so say something ourselves.
+        self._progress.label = f"Preparing environment: {spec.env}"
 
         self._run = OpRun(
             self._runner,
@@ -168,6 +187,29 @@ class OpsPanel(Container):
             self._run.cancel()
 
     def _on_progress(
+        self, message: str | None, current: int | None, maximum: int | None
+    ) -> None:
+        self._show_progress(message, current, maximum)
+
+    # -- environment building --------------------------------------------
+
+    def _on_build_progress(self, title: str, current: int, maximum: int) -> None:
+        """Report determinate build progress, e.g. downloading pixi itself."""
+        self._show_progress(title, current, maximum)
+
+    def _on_build_text(self, text: str) -> None:
+        """Report a chunk of the build tool's output.
+
+        Chunks are raw stream slices rather than tidy lines, so the last
+        non-empty line of one is the closest thing to a status message. The
+        whole thing goes to the log, where the detail is actually usable.
+        """
+        _log.info("%s", text.rstrip())
+        lines = [line for line in text.splitlines() if line.strip()]
+        if lines:
+            self._show_progress(lines[-1].strip(), None, None)
+
+    def _show_progress(
         self, message: str | None, current: int | None, maximum: int | None
     ) -> None:
         try:
@@ -214,13 +256,16 @@ class OpsPanel(Container):
         self._results.visible = bool(scalars)
 
     def _on_error(self, exc: Exception) -> None:
-        self._results.clear()
-        field = LineEdit(
-            name="error", label="error", value=f"{type(exc).__name__}: {exc}"
-        )
-        field.enabled = False
-        self._results.append(field)
-        self._results.visible = True
+        """Report a failed op through napari's own error machinery.
+
+        A one-line LineEdit in the panel could not show a traceback, and the
+        interesting part of an op failure is the traceback -- it comes from
+        another process, running another interpreter, and says what actually
+        went wrong in there. napari's notification carries it, keeps it in
+        the notification history, and looks like every other napari error.
+        """
+        _log.error("Op %s failed", self.spec.name, exc_info=exc)
+        notification_manager.receive_error(type(exc), exc, exc.__traceback__)
 
     def _on_finish(self) -> None:
         self._run = None

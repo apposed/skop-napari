@@ -32,6 +32,7 @@ no op in particular.
 | `skop.cancel_requested()` | the Cancel button |
 | an output's role | an Image / Labels / Points / … layer |
 | an output with no role | a row in the results panel |
+| a failure | a napari error notification, with traceback |
 
 That last pair is the point of skop's roles. `otsu` returns `LabelsData`, so
 its result arrives as a Labels layer rather than a grayscale image; `unseg`
@@ -70,6 +71,36 @@ says why.
 **Roles are guessed here, never in skop.** skop reports `role is None` for an
 unannotated array rather than assuming it is an image. This package makes that
 assumption, because it has a viewer to make it for.
+
+**Errors go to napari, not into the panel.** An op fails in another process,
+running another interpreter, so the interesting part of the failure is that
+process's traceback. `notification_manager.receive_error` carries it, keeps it
+in the notification history, and looks like every other napari error — none of
+which a one-line field in the widget could do.
+
+**Environment building reports through Appose's builder callbacks.**
+`Runner.subscribe_build_progress/_output/_error` feed the same progress bar
+the op itself uses, since building is by far the slowest part of a first run
+and happens inside `run()` with nothing else to show for it.
+
+Be aware of what those channels actually carry, which is not what their names
+suggest:
+
+- `subscribe_error` is the build tool's **stderr stream**, not a failure
+  report. Pixi writes all of its status there, success messages included, so
+  it is treated as status and logged, never raised as an error. A build that
+  genuinely fails raises out of `run()` instead, and takes the normal error
+  path.
+- `subscribe_progress` fires only while downloading the **build tool itself**
+  (`"Downloading pixi"`), which happens once ever. It is not per-package
+  progress.
+- With appose 0.11, a pixi build emits almost nothing: a fresh
+  python + scipy environment produced exactly one chunk, `"✔ The default
+  environment has been installed."`, at the end. Pixi suppresses its progress
+  bars when stdout is not a TTY. The wiring is correct and will light up if
+  that changes upstream, but do not expect a lively progress bar during a
+  build today — hence the explicit `Preparing environment: <id>` label, which
+  is otherwise the only feedback there is.
 
 ## Development
 
