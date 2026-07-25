@@ -8,10 +8,31 @@ testing the plumbing and testing a mock of it.
 
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 import pytest
 
 from skop_napari import OpsPanel
+
+
+@contextlib.contextmanager
+def errors_raised():
+    """Collect the error notifications raised inside the block.
+
+    NB: notification_manager.records accumulates across the whole session,
+    so a test that asserts on its length has to slice off what was already
+    there or it will see the previous test's errors.
+    """
+    from napari.utils.notifications import notification_manager
+
+    collected: list = []
+    with notification_manager:
+        already = len(notification_manager.records)
+        yield collected
+        collected.extend(
+            n for n in notification_manager.records[already:] if n.severity == "error"
+        )
 
 
 @pytest.fixture
@@ -29,6 +50,36 @@ def _choose(panel, function_name):
         lbl for lbl, spec in panel._by_label.items() if spec.function == function_name
     )
     panel._picker.value = label
+
+
+def test_napari_supplies_the_viewer_when_it_builds_the_widget(make_napari_viewer):
+    # Regression: the panel used to take `viewer: Any = None`, which napari
+    # does not recognise, so it was built with no viewer and every layer
+    # output was silently discarded. Built here through napari's own logic
+    # rather than by calling OpsPanel directly, which is what hid the bug.
+    from napari._qt.qt_main_window import _instantiate_dock_widget
+
+    viewer = make_napari_viewer()
+    widget = _instantiate_dock_widget(OpsPanel, viewer)
+    try:
+        assert widget._viewer is not None
+    finally:
+        widget._runner.close()
+
+
+def test_layer_outputs_with_no_viewer_are_reported_not_dropped(qtbot):
+    # A panel with no viewer must not look like a panel whose op did nothing.
+    widget = OpsPanel()
+    try:
+        _choose(widget, "find_nothing")
+        with errors_raised() as errors:
+            widget._on_done((np.zeros((4, 4), np.uint16), np.zeros((0, 3), np.int32)))
+    finally:
+        widget._runner.close()
+
+    assert len(errors) == 1
+    assert "labels" in str(errors[0].message)
+    assert "napari_viewer" in str(errors[0].message)
 
 
 def test_lists_the_collection(panel):
@@ -129,18 +180,16 @@ def test_progress_reaches_the_panel_and_cancel_stops_the_op(panel, qtbot):
 
 
 def test_a_failing_op_reports_through_napari(panel, qtbot):
-    from napari.utils.notifications import notification_manager
-
     # No image layer exists, so scale gets None and fails in the worker.
     _choose(panel, "scale")
     assert next(w for w in panel._inputs.widgets if w.name == "image").value is None
 
-    with notification_manager:  # Isolates and records this block's notices.
-        with qtbot.waitSignal(panel.finished, timeout=300_000):
-            panel._start()
-        notices = list(notification_manager.records)
+    with (
+        errors_raised() as errors,
+        qtbot.waitSignal(panel.finished, timeout=300_000),
+    ):
+        panel._start()
 
-    errors = [n for n in notices if n.severity == "error"]
     assert len(errors) == 1
     # The op failed in another process, and the notification carries that
     # process's traceback -- which is the whole reason not to use a LineEdit.

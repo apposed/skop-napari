@@ -11,9 +11,11 @@ is what gets split up.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
+import napari.viewer
 from magicgui.widgets import (
     ComboBox,
     Container,
@@ -23,7 +25,7 @@ from magicgui.widgets import (
     PushButton,
 )
 from napari.layers import Layer
-from napari.utils.notifications import notification_manager
+from napari.utils.notifications import notification_manager, show_error
 from psygnal import Signal
 from superqt.utils import ensure_main_thread
 
@@ -52,6 +54,14 @@ def _label_for(spec: OpSpec) -> str:
     )
 
 
+def _describe(value: Any) -> str:
+    """A short description of an argument, for the log."""
+    shape = getattr(value, "shape", None)
+    if shape is not None:
+        return f"{type(value).__name__}{tuple(shape)} {getattr(value, 'dtype', '')}"
+    return repr(value)
+
+
 def _layer_name(spec: OpSpec, output: str) -> str:
     if output.lower() in _GENERIC:
         return f"{output} [{spec.function}]"
@@ -66,11 +76,31 @@ class OpsPanel(Container):
     #: driving the panel from outside knows the outputs have landed.
     finished = Signal()
 
-    def __init__(self, viewer: Any = None, runner: Runner | None = None) -> None:
-        self._viewer = viewer
+    def __init__(
+        self,
+        napari_viewer: napari.viewer.Viewer | None = None,
+        runner: Runner | None = None,
+    ) -> None:
+        # NB: the parameter must be *named* napari_viewer. That is the first
+        # thing napari checks when instantiating a dock widget, and the only
+        # check that works here: its other route compares the annotation
+        # against the Viewer type, and `from __future__ import annotations`
+        # turns every annotation in this module into a string. Get this wrong
+        # and napari constructs the panel with no viewer at all, leaving
+        # nowhere to put an op's output.
+        self._viewer = napari_viewer
         # One Runner for the session: workers stay warm between invocations,
         # which is most of why running an op a second time is fast.
-        self._runner = runner if runner is not None else Runner()
+        #
+        # napari constructs this widget itself, so there is no call site to
+        # pass debug=True at; SKOP_NAPARI_DEBUG is the way in. It echoes the
+        # worker's own stdout and stderr, which is the only view of what the
+        # op is doing inside its own process.
+        self._runner = (
+            runner
+            if runner is not None
+            else Runner(debug=bool(os.environ.get("SKOP_NAPARI_DEBUG")))
+        )
         self._run: OpRun | None = None
 
         self._specs, self._failures = discover()
@@ -173,10 +203,18 @@ class OpsPanel(Container):
         # for a while before pixi says anything, so say something ourselves.
         self._progress.label = f"Preparing environment: {spec.env}"
 
+        args = self._inputs.values()
+        _log.info(
+            "Running %s in env %r with %s",
+            spec.name,
+            spec.env,
+            {k: _describe(v) for k, v in args.items()},
+        )
+
         self._run = OpRun(
             self._runner,
             spec,
-            self._inputs.values(),
+            args,
             on_progress=self._on_progress,
             on_done=self._on_done,
             on_error=self._on_error,
@@ -238,22 +276,38 @@ class OpsPanel(Container):
         spec = self.spec
         values = outputs_of(spec, result)
         scalars: list[tuple[str, Any]] = []
+        dropped: list[str] = []
 
         for output in spec.output_specs:
             value = values.get(output.name)
             if value is None:
+                _log.info("Op %s returned no %s", spec.name, output.name)
                 continue
             layer_type = layer_type_for(output)
             if layer_type is None:
                 scalars.append((output.name, value))
-            elif self._viewer is not None:
-                self._viewer.add_layer(
-                    Layer.create(
-                        value, {"name": _layer_name(spec, output.name)}, layer_type
-                    )
-                )
+            elif self._viewer is None:
+                dropped.append(output.name)
+            else:
+                name = _layer_name(spec, output.name)
+                _log.info("Adding %s layer %r from %s", layer_type, name, spec.name)
+                self._viewer.add_layer(Layer.create(value, {"name": name}, layer_type))
 
         self._show_scalars(scalars)
+
+        if dropped:
+            # Never fail quietly here. Without a viewer an op appears to run
+            # perfectly -- progress runs to completion, no error -- and its
+            # output simply evaporates, which is indistinguishable from the
+            # op being broken.
+            message = (
+                f"{spec.name} produced {', '.join(dropped)}, but this panel has "
+                f"no viewer to put them in. It was constructed without one; "
+                f"napari supplies a viewer only to a parameter named "
+                f"'napari_viewer'."
+            )
+            _log.error("%s", message)
+            show_error(message)
 
     def _show_scalars(self, scalars: list[tuple[str, Any]]) -> None:
         """Display outputs that are not layers -- counts, measurements."""

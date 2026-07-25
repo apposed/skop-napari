@@ -112,6 +112,44 @@ Two things worth knowing about those channels:
 The `Preparing environment: <id>` label covers the gap before pixi says
 anything, which on a cold cache can be a while.
 
+## When an op seems to do nothing
+
+Ops run in another process, so a failure there is easy to lose. Three
+increasingly loud ways to see what is going on, all from a terminal-launched
+napari (`uv run napari`) or its built-in console:
+
+**1. The panel's own log** — what it ran, with what, and what came back:
+
+```python
+import logging
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("skop_napari").setLevel(logging.INFO)
+```
+
+**2. The worker's stdout and stderr** — what the op is doing inside its own
+process, including anything it prints:
+
+```sh
+SKOP_NAPARI_DEBUG=1 uv run napari
+```
+
+napari builds this widget itself, so there is no call site at which to pass
+`Runner(debug=True)`; the environment variable is the way in.
+
+**3. Run the op without a GUI at all**, which removes every layer of this
+package from the picture:
+
+```python
+import skop
+from skop.ops.threshold import otsu
+with skop.Runner(debug=True) as runner:
+    print(runner.run(otsu, image=my_array))
+```
+
+Errors from an op become napari error notifications, carrying the worker
+process's traceback — check the notification button in the status bar, since
+a notification that has come and gone is still in that list.
+
 ## Development
 
 ```sh
