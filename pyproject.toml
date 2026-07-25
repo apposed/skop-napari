@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "skop-napari"
+version = "0.1.0.dev0"
+description = "Run scikit-ops ops from napari."
+license = "BSD-2-Clause"
+authors = [{name = "scikit-ops developers"}]
+readme = "README.md"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: napari",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: Unix",
+    "Operating System :: MacOS",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+requires-python = ">=3.10"
+dependencies = [
+    "scikit-ops",
+    "napari>=0.5",
+    "magicgui>=0.8",
+    "numpy",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-qt",
+    "ruff",
+    # napari's own pytest fixtures (make_napari_viewer) plus a Qt binding.
+    # NB: PyQt6 rather than PyQt5, which ships no Apple Silicon wheels.
+    "napari[testing,pyqt6]",
+]
+
+[project.entry-points."napari.manifest"]
+skop-napari = "skop_napari:napari.yaml"
+
+[project.urls]
+homepage = "https://github.com/apposed/skop-napari"
+source = "https://github.com/apposed/skop-napari"
+tracker = "https://github.com/apposed/skop-napari/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skop_napari"]
+
+[tool.uv.sources]
+# Developed alongside its base package; drop this once scikit-ops is on PyPI.
+scikit-ops = { path = "../scikit-ops", editable = true }
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint.isort]
+known-first-party = ["skop", "skop_napari"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,11 @@
+name: skop-napari
+display_name: scikit-ops
+
+contributions:
+  commands:
+    - id: skop-napari.ops_panel
+      title: Ops
+      python_name: skop_napari._panel:OpsPanel
+  widgets:
+    - command: skop-napari.ops_panel
+      display_name: Ops
