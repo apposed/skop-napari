@@ -56,6 +56,10 @@ packages = ["src/skop_napari"]
 [tool.uv.sources]
 # Developed alongside its base package; drop this once scikit-ops is on PyPI.
 scikit-ops = { path = "../scikit-ops", editable = true }
+# Note: the main tip, not the 0.11 release, for PixiInstallMonitor -- it is
+# what gives an environment build real progress to show. Matches the pin in
+# scikit-ops; both move back to the registry once a release carries it.
+appose = { git = "https://github.com/apposed/appose-python", branch = "main" }
 
 [tool.ruff]
 line-length = 88

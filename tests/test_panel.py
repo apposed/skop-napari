@@ -154,17 +154,31 @@ def test_a_failing_op_reports_through_napari(panel, qtbot):
     assert panel._button.enabled
 
 
-def test_build_output_drives_the_progress_bar(panel):
-    # Appose reports environment building through these callbacks. What pixi
-    # actually emits is stream chunks on stderr, success messages included.
-    panel._on_build_text("Resolving dependencies\n✔ The default environment\n")
-    assert panel._progress.label == "✔ The default environment"
+def test_build_progress_drives_the_progress_bar(panel):
+    # PixiInstallMonitor reports determinate progress per phase. These are
+    # the real titles it emits, in order.
+    panel._on_build_progress("Installing conda packages", 0, 30)
+    assert panel._progress.label == "Installing conda packages"
+    assert panel._progress.max == 30
 
-    # Only the tool download reports determinate progress.
-    panel._on_build_progress("Downloading pixi", 30, 100)
-    assert panel._progress.label == "Downloading pixi"
-    assert panel._progress.max == 100
-    assert panel._progress.value == 30
+    panel._on_build_progress("Installing conda packages", 21, 30)
+    assert panel._progress.value == 21
+
+
+def test_build_log_noise_is_logged_but_not_shown(panel, caplog):
+    # Appose runs pixi under -vv to drive the monitor, so most of the stderr
+    # stream is pixi's debug log rather than status worth showing.
+    with caplog.at_level("INFO", logger="skop_napari"):
+        panel._on_build_text(
+            "DEBUG pixi_config: Loading config from /etc/pixi/config.toml\n"
+            " INFO pixi_core::lock_file::update: Installed environment\n"
+        )
+    assert panel._progress.label == ""
+    assert "pixi_config" in caplog.text  # Still recoverable from the log.
+
+    # A human-facing line does reach the bar.
+    panel._on_build_text("✔ The default environment has been installed.\n")
+    assert panel._progress.label == "✔ The default environment has been installed."
 
 
 def test_build_callbacks_are_registered_on_the_runner(panel):

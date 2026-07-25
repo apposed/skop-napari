@@ -11,6 +11,7 @@ is what gets split up.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from magicgui.widgets import (
@@ -38,6 +39,9 @@ _GENERIC = frozenset(
 )
 
 _log = logging.getLogger("skop_napari")
+
+# A verbose-log line from the build tool, e.g. "DEBUG pixi_config: ...".
+_LOG_RECORD = re.compile(r"^\s*(TRACE|DEBUG|INFO|WARN|WARNING|ERROR)\b")
 
 
 def _label_for(spec: OpSpec) -> str:
@@ -200,14 +204,19 @@ class OpsPanel(Container):
     def _on_build_text(self, text: str) -> None:
         """Report a chunk of the build tool's output.
 
-        Chunks are raw stream slices rather than tidy lines, so the last
-        non-empty line of one is the closest thing to a status message. The
-        whole thing goes to the log, where the detail is actually usable.
+        Everything goes to the log, where the detail is usable. Only the
+        occasional human-facing line reaches the progress bar: Appose runs
+        pixi under -vv to drive PixiInstallMonitor, so most of this stream is
+        pixi's own debug log rather than anything worth showing.
         """
         _log.info("%s", text.rstrip())
-        lines = [line for line in text.splitlines() if line.strip()]
-        if lines:
-            self._show_progress(lines[-1].strip(), None, None)
+        status = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not _LOG_RECORD.match(line)
+        ]
+        if status:
+            self._show_progress(status[-1], None, None)
 
     def _show_progress(
         self, message: str | None, current: int | None, maximum: int | None

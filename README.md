@@ -83,24 +83,34 @@ which a one-line field in the widget could do.
 the op itself uses, since building is by far the slowest part of a first run
 and happens inside `run()` with nothing else to show for it.
 
-Be aware of what those channels actually carry, which is not what their names
-suggest:
+A fresh build drives the bar like this:
 
-- `subscribe_error` is the build tool's **stderr stream**, not a failure
-  report. Pixi writes all of its status there, success messages included, so
-  it is treated as status and logged, never raised as an error. A build that
-  genuinely fails raises out of `run()` instead, and takes the normal error
-  path.
-- `subscribe_progress` fires only while downloading the **build tool itself**
-  (`"Downloading pixi"`), which happens once ever. It is not per-package
-  progress.
-- With appose 0.11, a pixi build emits almost nothing: a fresh
-  python + scipy environment produced exactly one chunk, `"✔ The default
-  environment has been installed."`, at the end. Pixi suppresses its progress
-  bars when stdout is not a TTY. The wiring is correct and will light up if
-  that changes upstream, but do not expect a lively progress bar during a
-  build today — hence the explicit `Preparing environment: <id>` label, which
-  is otherwise the only feedback there is.
+```
+Preparing environment: probe          (indeterminate)
+Installing conda packages             0/30
+Installing conda packages             30/30
+Done                                  1/1
+✔ The default environment has been installed.
+```
+
+Two things worth knowing about those channels:
+
+- **Subscribing to progress is what enables it.** Appose's
+  `PixiInstallMonitor` only wires up when a progress subscriber exists, and
+  it works by running pixi under `-vv` and reading the phase transitions out
+  of its log. Appose 0.11 has no monitor at all and reports only a final
+  summary line, which is why both projects source Appose from its main
+  branch for now.
+- **`subscribe_error` is the stderr stream, not a failure report.** Pixi
+  writes ordinary status there, success message included — and under the
+  `-vv` the monitor injects, its entire debug log too. So this channel is
+  logged in full and filtered before it reaches the progress bar: lines that
+  look like log records (`DEBUG pixi_config: ...`) are noise, and only
+  human-facing lines are shown. A build that genuinely fails raises out of
+  `run()` and takes the normal error path.
+
+The `Preparing environment: <id>` label covers the gap before pixi says
+anything, which on a cold cache can be a while.
 
 ## Development
 
