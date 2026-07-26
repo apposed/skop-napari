@@ -21,6 +21,7 @@ to change the panel and wants to know which of its oddities are load-bearing.
 | [0003](design/0003-building-input-widgets.md) | One parameter at a time, and surviving the ones that fail |
 | [0004](design/0004-running-off-the-gui-thread.md) | Threads, cancellation, and outliving the widget |
 | [0005](design/0005-reporting-through-napari.md) | Errors, build progress, and the bug that ate every output |
+| [0006](design/0006-axis-awareness.md) | Guessing a layer's axes, and offering how to adapt them |
 
 ## Spec
 

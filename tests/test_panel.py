@@ -245,3 +245,98 @@ def test_build_text_crosses_from_the_build_thread_to_the_gui(panel, qtbot):
     threading.Thread(target=subscriber, args=("✔ installed\n",)).start()
 
     qtbot.waitUntil(lambda: panel._progress.label == "✔ installed", timeout=10_000)
+
+
+# -- axis awareness --------------------------------------------------------
+
+
+def _row(panel, param="image"):
+    return next(r for r in panel._adapt._rows if r.param.name == param)
+
+
+def test_only_ops_that_declared_axes_get_an_adaptation_row(panel):
+    _choose(panel, "add")
+    assert panel._adapt._rows == []
+    _choose(panel, "quadrants")
+    assert [r.param.name for r in panel._adapt._rows] == ["image"]
+
+
+def test_a_stack_offers_iteration_first_and_slicing_second(panel):
+    panel._viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+
+    row = _row(panel)
+    # The axes were resolved from the viewer's layout, and written back so
+    # the next run reads them off the layer instead of guessing again.
+    assert row._axes.value == "z y x"
+    assert panel._viewer.layers["stack"].metadata["skop_axes"] == ("z", "y", "x")
+
+    summaries = [plan.summary for plan in row._plan.choices]
+    assert "run 3 times" in summaries[0]
+    assert "discarding" in summaries[1]
+    # Lossless first, and selected: the default never throws data away.
+    assert row.plan.lossless
+    assert row.plan.iterate == ("z",)
+
+
+def test_the_slice_plan_follows_the_viewers_slider(panel):
+    panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    panel._viewer.dims.set_current_step(0, 3)
+    panel._replan()
+
+    lossy = next(p for p in _row(panel)._plan.choices if not p.lossless)
+    assert lossy.select == (("z", 3),)
+    assert "z=3" in lossy.summary
+
+
+def test_editing_the_axes_replans(panel):
+    panel._viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+
+    # A lifetime axis is not z, and skop has never heard of it -- which is
+    # fine, because an op that iterates does not need to know what it is.
+    row._axes.value = "lifetime y x"
+    assert row.plan.iterate == ("lifetime",)
+    assert row.plan.calls == 3
+
+
+def test_an_input_the_op_cannot_use_blocks_the_run_with_a_reason(panel):
+    panel._viewer.add_image(np.zeros((3, 8), dtype=np.float32), name="odd")
+    _choose(panel, "quadrants")
+    _row(panel)._axes.value = "z x"
+
+    assert not panel._button.enabled
+    assert "no y axis" in panel._notes.value
+
+
+def test_a_2d_op_runs_over_a_stack_and_labels_the_result(panel, qtbot):
+    viewer = panel._viewer
+    viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
+    result = viewer.layers["result [quadrants]"]
+    assert type(result).__name__ == "Labels"
+    # One call per plane, stacked back up, with label IDs made unique.
+    assert result.data.shape == (3, 8, 6)
+    assert result.data.max() == 12
+    # Stamped, so the next op run against this layer does not guess.
+    assert result.metadata["skop_axes"] == ("z", "y", "x")
+    assert tuple(result.axis_labels) == ("z", "y", "x")
+
+
+def test_choosing_the_slice_plan_runs_once(panel, qtbot):
+    viewer = panel._viewer
+    viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+    row._plan.value = next(p for p in row._plan.choices if not p.lossless)
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
+    assert viewer.layers["result [quadrants]"].data.shape == (8, 6)

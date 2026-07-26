@@ -31,8 +31,10 @@ from superqt.utils import ensure_main_thread
 
 from skop import OpSpec, Runner, discover
 
+from ._axes import METADATA_KEY
+from ._plans import Adaptations
 from ._roles import annotation_for, layer_type_for
-from ._run import OpRun, outputs_of
+from ._run import OpRun, outputs_of, resolve
 from ._widget import Inputs, build_inputs
 
 # Output names too generic to serve as layer names on their own.
@@ -114,6 +116,7 @@ class OpsPanel(Container):
         )
         self._doc = Label(value="")
         self._inputs_box = Container(labels=True)
+        self._adapt = Adaptations()
         self._notes = Label(value="")
         self._button = PushButton(text="Run")
         self._cancel = PushButton(text="Cancel", visible=False)
@@ -125,6 +128,7 @@ class OpsPanel(Container):
                 self._picker,
                 self._doc,
                 self._inputs_box,
+                self._adapt,
                 self._notes,
                 self._button,
                 self._cancel,
@@ -171,10 +175,24 @@ class OpsPanel(Container):
         self._inputs_box.clear()
         self._inputs_box.extend(self._inputs.widgets)
 
-        self._notes.value = self._notes_for(self._inputs, spec)
-        self._button.enabled = self._inputs.runnable
+        adaptable = self._adapt.rebuild(spec)
+        # Which array is selected decides what can be done with it, so the
+        # adaptation rows follow the layer combos rather than being computed
+        # once. The rows themselves also re-plan when their axes are edited.
+        for widget in self._inputs.widgets:
+            if widget.name in adaptable:
+                widget.changed.connect(self._replan)
+        self._adapt.watch(self._replan)
+        self._replan()
+
         self._results.clear()
         self._results.visible = False
+
+    def _replan(self) -> None:
+        """Re-resolve axes and re-plan, then say whether the op can run."""
+        self._adapt.refresh(resolve(self.spec), self._inputs.values(), self._viewer)
+        self._notes.value = self._notes_for(self._inputs, self.spec)
+        self._button.enabled = self._inputs.runnable and not self._adapt.problems
 
     def _notes_for(self, inputs: Inputs, spec: OpSpec) -> str:
         notes = [f"Environment: {spec.env}"]
@@ -184,6 +202,7 @@ class OpsPanel(Container):
         if inputs.blocking:
             names = ", ".join(name for name, _ in inputs.blocking)
             notes.append(f"Cannot run: no widget for required input(s) {names}")
+        notes.extend(f"Cannot run: {problem}" for problem in self._adapt.problems)
         return "\n".join(notes)
 
     # -- running ---------------------------------------------------------
@@ -204,17 +223,27 @@ class OpsPanel(Container):
         self._progress.label = f"Preparing environment: {spec.env}"
 
         args = self._inputs.values()
+        # Frozen for the duration of the run: the user is free to change the
+        # selection while it works, and the outputs still belong to the plan
+        # that produced them.
+        plans = self._adapt.plans
+        self._output_axes = self._adapt.output_axes
         _log.info(
-            "Running %s in env %r with %s",
+            "Running %s in env %r with %s%s",
             spec.name,
             spec.env,
             {k: _describe(v) for k, v in args.items()},
+            "".join(f"\n  {name}: {plan.summary}" for name, plan in plans.items()),
         )
+        if any(plan.calls > 1 for plan in plans.values()):
+            calls = max(plan.calls for plan in plans.values())
+            self._progress.label = f"Preparing environment: {spec.env} ({calls} runs)"
 
         self._run = OpRun(
             self._runner,
             spec,
             args,
+            plans=plans,
             on_progress=self._on_progress,
             on_done=self._on_done,
             on_error=self._on_error,
@@ -291,7 +320,9 @@ class OpsPanel(Container):
             else:
                 name = _layer_name(spec, output.name)
                 _log.info("Adding %s layer %r from %s", layer_type, name, spec.name)
-                self._viewer.add_layer(Layer.create(value, {"name": name}, layer_type))
+                self._viewer.add_layer(
+                    Layer.create(value, self._layer_args(name, value), layer_type)
+                )
 
         self._show_scalars(scalars)
 
@@ -308,6 +339,20 @@ class OpsPanel(Container):
             )
             _log.error("%s", message)
             show_error(message)
+
+    def _layer_args(self, name: str, value: Any) -> dict[str, Any]:
+        """Layer keywords for one output, carrying its axes if we know them.
+
+        Stamping the result closes the loop: the next op run against this
+        layer reads its axes off rung one instead of guessing again, and the
+        viewer's sliders are labelled 'z' rather than '-3'.
+        """
+        args: dict[str, Any] = {"name": name}
+        axes = getattr(self, "_output_axes", ())
+        if axes and len(axes) == getattr(value, "ndim", -1):
+            args["metadata"] = {METADATA_KEY: tuple(axes)}
+            args["axis_labels"] = tuple(axes)
+        return args
 
     def _show_scalars(self, scalars: list[tuple[str, Any]]) -> None:
         """Display outputs that are not layers -- counts, measurements."""
