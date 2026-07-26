@@ -1,0 +1,29 @@
+# skop-napari documentation
+
+Same convention as [scikit-ops](https://github.com/apposed/scikit-ops):
+
+```
+docs/design/NNNN-*.md   Settled. Why the code is shaped this way, and what
+                        else was considered. Written after the fact.
+docs/spec/*.md          Proposed. Not built. Deleted or graduated into a
+                        design doc once it is.
+```
+
+The [README](../README.md) is the short form. These are for someone who needs
+to change the panel and wants to know which of its oddities are load-bearing.
+
+## Design
+
+| | |
+| --- | --- |
+| [0001](design/0001-no-magicgui-package.md) | Why there is no `skop-magicgui` distribution |
+| [0002](design/0002-one-panel-for-all-ops.md) | One Ops widget, not one contribution per op |
+| [0003](design/0003-building-input-widgets.md) | One parameter at a time, and surviving the ones that fail |
+| [0004](design/0004-running-off-the-gui-thread.md) | Threads, cancellation, and outliving the widget |
+| [0005](design/0005-reporting-through-napari.md) | Errors, build progress, and the bug that ate every output |
+
+## Spec
+
+| | |
+| --- | --- |
+| [dynamic-registration.md](spec/dynamic-registration.md) | Splitting the panel up when npe2 allows it |

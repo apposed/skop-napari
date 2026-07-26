@@ -55,6 +55,9 @@ moves out.
 
 ## Design notes
 
+The long form, with the alternatives considered and the evidence behind each
+call, is in [`docs/`](docs/README.md). In brief:
+
 **One widget, not one per op.** npe2 wants a static manifest, while skop finds
 its ops by importing them, so a contribution per op would mean generating the
 manifest at build time and losing the ability to drop in a new op and see it
