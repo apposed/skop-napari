@@ -1,5 +1,12 @@
 # 0006 — Axis awareness
 
+> **Superseded in part by [0007](0007-axis-mapping-ui.md).** The "choice is a
+> combo box" section below described picking from `skop.plans()`, which no
+> longer exists: skop now returns one editable plan, and the panel shows a
+> mapping per slot plus a disposition per leftover axis. The four resolution
+> rungs, the write-back, and the "convention only invents names no op consumes"
+> rule are unchanged and still the heart of this document.
+
 ## The problem
 
 `stardist2d` is 2-D. A napari user with a `(z, y, x)` stack selected the layer,

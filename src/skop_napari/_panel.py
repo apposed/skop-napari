@@ -203,6 +203,10 @@ class OpsPanel(Container):
             names = ", ".join(name for name, _ in inputs.blocking)
             notes.append(f"Cannot run: no widget for required input(s) {names}")
         notes.extend(f"Cannot run: {problem}" for problem in self._adapt.problems)
+        # Warnings never block a run. An op fed an axis it did not ask for is
+        # the user's call to make; the panel's job is to make sure it is a
+        # call they can see themselves making.
+        notes.extend(f"Check: {warning}" for warning in self._adapt.warnings)
         return "\n".join(notes)
 
     # -- running ---------------------------------------------------------

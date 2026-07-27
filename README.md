@@ -26,7 +26,7 @@ no op in particular.
 | `Annotated[..., {...}]` UI hints | that widget's type, range, step |
 | the docstring's `Args:` section | the widget's tooltip |
 | an `ImageData`/`LabelsData`/… role | a layer combo box, not a file picker |
-| an `Axes(...)` declaration | an axes field and an adaptation choice |
+| an `Axes(...)` declaration | an axes field, a mapping per slot, a choice per leftover axis |
 | an `Out[...]` parameter | nothing — a user is never asked for a buffer |
 | the op's `env` | the Appose environment it runs in |
 | `skop.progress(...)` | the progress bar |
@@ -45,7 +45,7 @@ two rows of counts.
 ```
 src/skop_napari/_roles.py   Role -> napari type; the only napari-specific part
 src/skop_napari/_axes.py    working out what a layer's axes are (no Qt)
-src/skop_napari/_plans.py   the axes field and the adaptation combo
+src/skop_napari/_plans.py   the axes field, slot mapping and axis dispositions
 src/skop_napari/_widget.py  OpSpec -> magicgui widgets (imports no napari)
 src/skop_napari/_run.py     running an op off the GUI thread
 src/skop_napari/_panel.py   the Ops widget itself
@@ -78,14 +78,17 @@ says why.
 unannotated array rather than assuming it is an image. This package makes that
 assumption, because it has a viewer to make it for.
 
-**So are axes.** An op declaring `Axes.pack("yxc?")` accepts a plane, so
-handing it a `(z, y, x)` stack means deciding something: run per slice, or run
-on the one being looked at. skop enumerates those; this package works out what
-the layer's axes are in the first place — from its metadata, an xarray's dims,
-NGFF axes, napari's own `axis_labels` and `rgb`, or finally shape and viewer
-layout — and shows the choice as a combo box, lossless option first. Every
-answer is written back onto the layer, and every result is stamped, so a
-session gets more certain as it goes.
+**So are axes.** An op declaring `Axes("y", "x", "c?")` consumes two or three
+axes, so handing it a `(z, y, x)` stack means deciding something: which axes
+feed the op, and what becomes of the rest. skop supplies a default answer and
+flags where it looks doubtful, but forbids nothing — whether a stack should be
+processed plane by plane or whole is a property of the experiment, not of the
+op. This package works out what the layer's axes are in the first place — from
+its metadata, an xarray's dims, NGFF axes, napari's own `axis_labels` and
+`rgb`, or finally shape and viewer layout — and then lets the mapping be
+edited: a combo per slot, and iterate/current-position/hand-to-the-op per
+leftover axis. Every answer is written back onto the layer, and every result is
+stamped, so a session gets more certain as it goes.
 
 **Errors go to napari, not into the panel.** An op fails in another process,
 running another interpreter, so the interesting part of the failure is that

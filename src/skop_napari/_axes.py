@@ -32,12 +32,16 @@ METADATA_KEY = "skop_axes"
 #:
 #: Note what is *not* here: c. Convention may only invent axis names that no
 #: op consumes, and c is the one canonical axis ops routinely declare as
-#: optional -- `Axes.pack("yxc?")` is every image op in the collection. Guess
-#: c wrongly and a timepoint axis lands in the channel slot, where `to_gray`
-#: averages over it instead of iterating; guess t wrongly and the worst case
-#: is that the op iterates over something the user would have called z, which
-#: computes exactly the same thing. A trailing RGB extent is the sole way c
-#: gets inferred, and that reads a real property of the data.
+#: optional -- `Axes("y", "x", "c?")` is every image op in the collection.
+#: Guess c wrongly and a timepoint axis lands in the channel slot, where
+#: `to_gray` averages over it instead of iterating; guess t wrongly and the
+#: worst case is that the op iterates over something the user would have
+#: called z, which computes exactly the same thing. A trailing RGB extent is
+#: the sole way c gets inferred, and that reads a real property of the data.
+#:
+#: skop now enforces the same rule from its side -- an optional slot is filled
+#: by a name match and never by position ([skop design 0006]) -- so a wrong
+#: guess here is caught twice rather than once.
 _CONVENTIONAL = ("t", "z")
 
 

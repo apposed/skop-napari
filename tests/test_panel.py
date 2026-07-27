@@ -84,7 +84,7 @@ def test_layer_outputs_with_no_viewer_are_reported_not_dropped(qtbot):
 
 def test_lists_the_collection(panel):
     functions = {spec.function for spec in panel._by_label.values()}
-    assert {"otsu", "stardist2d", "unseg", "add"} <= functions
+    assert {"otsu", "stardist2d_fluo", "unseg", "add"} <= functions
 
 
 def test_choosing_an_op_rebuilds_the_inputs(panel):
@@ -261,7 +261,7 @@ def test_only_ops_that_declared_axes_get_an_adaptation_row(panel):
     assert [r.param.name for r in panel._adapt._rows] == ["image"]
 
 
-def test_a_stack_offers_iteration_first_and_slicing_second(panel):
+def test_a_stack_maps_its_inner_axes_and_offers_the_rest(panel):
     panel._viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
     _choose(panel, "quadrants")
 
@@ -271,23 +271,62 @@ def test_a_stack_offers_iteration_first_and_slicing_second(panel):
     assert row._axes.value == "z y x"
     assert panel._viewer.layers["stack"].metadata["skop_axes"] == ("z", "y", "x")
 
-    summaries = [plan.summary for plan in row._plan.choices]
-    assert "run 3 times" in summaries[0]
-    assert "discarding" in summaries[1]
-    # Lossless first, and selected: the default never throws data away.
+    # y and x filled by name; z is left over, with a control of its own.
+    assert row.plan.mapping == (1, 2)
+    assert [c.value for c in row._slots] == [1, 2]
+    assert [c.label for c in row._extra] == ["z"]
+    # The default keeps everything, so nothing needs confirming.
     assert row.plan.lossless
-    assert row.plan.iterate == ("z",)
+    assert row.plan.iterate == (0,)
+    assert row.warnings == ()
 
 
-def test_the_slice_plan_follows_the_viewers_slider(panel):
+def test_a_leftover_axis_can_be_switched_to_the_current_position(panel):
     panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
     _choose(panel, "quadrants")
     panel._viewer.dims.set_current_step(0, 3)
     panel._replan()
 
-    lossy = next(p for p in _row(panel)._plan.choices if not p.lossless)
-    assert lossy.select == (("z", 3),)
-    assert "z=3" in lossy.summary
+    row = _row(panel)
+    row._extra[0].value = "select"
+
+    assert row.plan.select == ((0, 3),)
+    assert "z=3" in row.plan.summary
+    assert not row.plan.lossless
+
+
+def test_remapping_the_slots_processes_cross_sections(panel):
+    # The point of the mapping controls: feed the op ZY planes instead of YX
+    # ones, and iterate over x. One combo per slot, set independently.
+    panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+
+    row._slots[0].value = 0  # y <- z; the old y axis falls out to leftover
+    assert row.plan.mapping == (0, 2)
+    assert row.plan.iterate == (1,)
+
+    row._slots[1].value = 1  # x <- y; now x is the leftover one
+    assert row.plan.mapping == (0, 1)
+    assert row.plan.iterate == (2,)
+    assert row.plan.output_axes == ("x", "z", "y")
+    assert row.warnings == (
+        "y is being fed the z axis",
+        "x is being fed the y axis",
+    )
+
+
+def test_remapping_onto_a_taken_axis_swaps_the_two(panel):
+    # Choosing an axis another slot already holds has to displace it; swapping
+    # is what a user means by dragging one onto the other.
+    panel._viewer.add_image(np.zeros((8, 6), dtype=np.float32), name="plane")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+
+    row._slots[0].value = 1  # y <- x, which slot x was holding
+
+    assert row.plan.mapping == (1, 0)
+    assert row.plan.iterate == ()
 
 
 def test_editing_the_axes_replans(panel):
@@ -298,17 +337,30 @@ def test_editing_the_axes_replans(panel):
     # A lifetime axis is not z, and skop has never heard of it -- which is
     # fine, because an op that iterates does not need to know what it is.
     row._axes.value = "lifetime y x"
-    assert row.plan.iterate == ("lifetime",)
+    assert row.plan.iterate == (0,)
     assert row.plan.calls == 3
 
 
-def test_an_input_the_op_cannot_use_blocks_the_run_with_a_reason(panel):
+def test_a_misaligned_mapping_warns_without_blocking_the_run(panel):
+    # What used to be refused outright. The op wanted y and x and is getting
+    # z and x; that is the user's call, so it runs and the panel says so.
     panel._viewer.add_image(np.zeros((3, 8), dtype=np.float32), name="odd")
     _choose(panel, "quadrants")
     _row(panel)._axes.value = "z x"
 
+    assert panel._button.enabled
+    assert "Check: image: y is being fed the z axis" in panel._notes.value
+
+
+def test_labels_that_do_not_describe_the_array_block_the_run(panel):
+    # Naming fewer axes than the array has is one of the few things left that
+    # genuinely cannot be adapted, so it still disables Run and says why.
+    panel._viewer.add_image(np.zeros((3, 8), dtype=np.float32), name="plane")
+    _choose(panel, "quadrants")
+    _row(panel)._axes.value = "x"
+
     assert not panel._button.enabled
-    assert "no y axis" in panel._notes.value
+    assert "1 axis label(s)" in panel._notes.value
 
 
 def test_a_2d_op_runs_over_a_stack_and_labels_the_result(panel, qtbot):
@@ -329,14 +381,30 @@ def test_a_2d_op_runs_over_a_stack_and_labels_the_result(panel, qtbot):
     assert tuple(result.axis_labels) == ("z", "y", "x")
 
 
-def test_choosing_the_slice_plan_runs_once(panel, qtbot):
+def test_choosing_the_current_position_runs_once(panel, qtbot):
     viewer = panel._viewer
     viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
     _choose(panel, "quadrants")
-    row = _row(panel)
-    row._plan.value = next(p for p in row._plan.choices if not p.lossless)
+    _row(panel)._extra[0].value = "select"
 
     with qtbot.waitSignal(panel.finished, timeout=300_000):
         panel._start()
 
     assert viewer.layers["result [quadrants]"].data.shape == (8, 6)
+
+
+def test_a_remapped_run_processes_cross_sections(panel, qtbot):
+    viewer = panel._viewer
+    viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+    row._slots[0].value = 0  # y <- z
+    row._slots[1].value = 1  # x <- y, so the op sees ZY planes and x is spare
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
+    result = viewer.layers["result [quadrants]"]
+    assert result.data.shape == (6, 5, 8)
+    # Stamped in the caller's own vocabulary, remapping and all.
+    assert tuple(result.axis_labels) == ("x", "z", "y")
