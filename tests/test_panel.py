@@ -295,6 +295,35 @@ def test_a_leftover_axis_can_be_switched_to_the_current_position(panel):
     assert not row.plan.lossless
 
 
+def test_moving_the_slider_moves_the_selected_position(panel):
+    # Regression: the plan was made once and never revisited, so "current
+    # position" meant wherever the viewer happened to be when the axis was
+    # switched, and Run used that stale slice.
+    panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+    row._extra[0].value = "select"
+
+    panel._viewer.dims.set_current_step(0, 3)
+    assert row.plan.select == ((0, 3),)
+    assert "z=3" in row.plan.summary
+
+    panel._viewer.dims.set_current_step(0, 1)
+    assert row.plan.select == ((0, 1),)
+    assert "z=1" in row.plan.summary
+
+
+def test_moving_the_slider_leaves_a_position_free_plan_alone(panel):
+    # The default plan iterates, so it says the same thing wherever the
+    # sliders are; re-planning per slider step would be churn for nothing.
+    panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    before = _row(panel).plan
+
+    panel._viewer.dims.set_current_step(0, 3)
+    assert _row(panel).plan is before
+
+
 def test_remapping_the_slots_processes_cross_sections(panel):
     # The point of the mapping controls: feed the op ZY planes instead of YX
     # ones, and iterate over x. One combo per slot, set independently.

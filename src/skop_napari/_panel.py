@@ -142,6 +142,13 @@ class OpsPanel(Container):
         self._button.changed.connect(self._start)
         self._cancel.changed.connect(self._stop)
 
+        # "Current position" means the position right now, not the one that
+        # happened to be showing when the op was picked. Without this the
+        # panel says z=33 while the viewer sits at z=20, and Run believes the
+        # panel.
+        if self._viewer is not None:
+            self._viewer.dims.events.current_step.connect(self._moved)
+
         # Building an environment happens inside run(), on the worker thread,
         # and is the slowest part of a first run by a wide margin. These
         # callbacks are the only way to show anything while it happens.
@@ -193,6 +200,24 @@ class OpsPanel(Container):
         self._adapt.refresh(resolve(self.spec), self._inputs.values(), self._viewer)
         self._notes.value = self._notes_for(self._inputs, self.spec)
         self._button.enabled = self._inputs.runnable and not self._adapt.problems
+
+    def _moved(self) -> None:
+        """Re-plan when the viewer's sliders move, if that changes anything.
+
+        Dragging a slider fires this once per step, and re-planning rebuilds
+        every combo in the row, so it is worth doing only when a plan actually
+        reads the position -- which is exactly when some axis is set to
+        "current position". Every other plan is the same plan wherever the
+        sliders are.
+        """
+        if not any(plan.select for plan in self._adapt.plans.values()):
+            return
+        try:
+            self._replan()
+        except RuntimeError:
+            # The panel was closed but the viewer outlived it, so this event
+            # is still arriving at widgets whose Qt objects are gone.
+            self._viewer.dims.events.current_step.disconnect(self._moved)
 
     def _notes_for(self, inputs: Inputs, spec: OpSpec) -> str:
         notes = [f"Environment: {spec.env}"]
