@@ -142,6 +142,22 @@ def test_outputs_are_labeled_by_name():
     assert outputs_of(multi, (scaled, 7.0)) == {"scaled": scaled, "total": 7.0}
 
 
+def test_a_single_field_namedtuple_output_is_unwrapped():
+    # An op may return a one-field NamedTuple to name its single output --
+    # the box detectors do, so their layer is called "boxes" and not
+    # "result". Counting outputs cannot tell that from a bare return, and
+    # labeling the tuple itself hands napari a tuple where an array belongs.
+    from skop.ops.detect import fastsam
+    from skop.ops.detect._result import Boxes
+    from skop_napari._run import outputs_of
+
+    boxes = np.array([[236.4, 144.1, 287.5, 201.0]], dtype=np.float32)
+    labeled = outputs_of(skop.spec(fastsam), Boxes(boxes))
+
+    assert list(labeled) == ["boxes"]
+    assert labeled["boxes"] is boxes
+
+
 def test_resolve_finds_the_op_function():
     from skop.ops import toy
     from skop_napari._run import resolve

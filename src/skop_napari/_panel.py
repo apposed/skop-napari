@@ -33,13 +33,27 @@ from skop import OpSpec, Runner, discover
 
 from ._axes import METADATA_KEY
 from ._plans import Adaptations
-from ._roles import annotation_for, layer_type_for
+from ._roles import annotation_for, layer_args_for, layer_type_for
 from ._run import OpRun, outputs_of, resolve
 from ._widget import Inputs, build_inputs
 
-# Output names too generic to serve as layer names on their own.
+# Output names too generic to serve as layer names on their own. "boxes" is
+# here for the same reason "labels" is: every detector produces some, they are
+# meant to be interchangeable, and two in one session would otherwise both be
+# called "boxes" with only a napari-supplied counter to tell them apart.
 _GENERIC = frozenset(
-    {"out", "output", "result", "image", "labels", "points", "mask", "nuclei", "cells"}
+    {
+        "boxes",
+        "cells",
+        "image",
+        "labels",
+        "mask",
+        "nuclei",
+        "out",
+        "output",
+        "points",
+        "result",
+    }
 )
 
 _log = logging.getLogger("skop_napari")
@@ -349,9 +363,18 @@ class OpsPanel(Container):
             else:
                 name = _layer_name(spec, output.name)
                 _log.info("Adding %s layer %r from %s", layer_type, name, spec.name)
-                self._viewer.add_layer(
-                    Layer.create(value, self._layer_args(name, value), layer_type)
-                )
+                # Two separate jobs, in order. layer_args_for adapts the data
+                # to the layout napari wants; _layer_args then says what to
+                # call the layer and stamps its axes. Asking _layer_args about
+                # the *adapted* data rather than the raw value is deliberate:
+                # its axis check compares against ndim, so boxes reshaped out
+                # of image space stop matching the image's axis count and are
+                # correctly left unlabelled -- a Shapes layer's dimensions are
+                # coordinates, not axes.
+                data, extra = layer_args_for(output, value)
+                args = self._layer_args(name, data)
+                args.update(extra)
+                self._viewer.add_layer(Layer.create(data, args, layer_type))
 
         self._show_scalars(scalars)
 
