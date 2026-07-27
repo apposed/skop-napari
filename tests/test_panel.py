@@ -84,7 +84,7 @@ def test_layer_outputs_with_no_viewer_are_reported_not_dropped(qtbot):
 
 def test_lists_the_collection(panel):
     functions = {spec.function for spec in panel._by_label.values()}
-    assert {"otsu", "stardist2d", "unseg", "add"} <= functions
+    assert {"otsu", "stardist2d_fluo", "unseg", "add"} <= functions
 
 
 def test_choosing_an_op_rebuilds_the_inputs(panel):
@@ -245,3 +245,195 @@ def test_build_text_crosses_from_the_build_thread_to_the_gui(panel, qtbot):
     threading.Thread(target=subscriber, args=("✔ installed\n",)).start()
 
     qtbot.waitUntil(lambda: panel._progress.label == "✔ installed", timeout=10_000)
+
+
+# -- axis awareness --------------------------------------------------------
+
+
+def _row(panel, param="image"):
+    return next(r for r in panel._adapt._rows if r.param.name == param)
+
+
+def test_only_ops_that_declared_axes_get_an_adaptation_row(panel):
+    _choose(panel, "add")
+    assert panel._adapt._rows == []
+    _choose(panel, "quadrants")
+    assert [r.param.name for r in panel._adapt._rows] == ["image"]
+
+
+def test_a_stack_maps_its_inner_axes_and_offers_the_rest(panel):
+    panel._viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+
+    row = _row(panel)
+    # The axes were resolved from the viewer's layout, and written back so
+    # the next run reads them off the layer instead of guessing again.
+    assert row._axes.value == "z y x"
+    assert panel._viewer.layers["stack"].metadata["skop_axes"] == ("z", "y", "x")
+
+    # y and x filled by name; z is left over, with a control of its own.
+    assert row.plan.mapping == (1, 2)
+    assert [c.value for c in row._slots] == [1, 2]
+    assert [c.label for c in row._extra] == ["z"]
+    # The default keeps everything, so nothing needs confirming.
+    assert row.plan.lossless
+    assert row.plan.iterate == (0,)
+    assert row.warnings == ()
+
+
+def test_a_leftover_axis_can_be_switched_to_the_current_position(panel):
+    panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    panel._viewer.dims.set_current_step(0, 3)
+    panel._replan()
+
+    row = _row(panel)
+    row._extra[0].value = "select"
+
+    assert row.plan.select == ((0, 3),)
+    assert "z=3" in row.plan.summary
+    assert not row.plan.lossless
+
+
+def test_moving_the_slider_moves_the_selected_position(panel):
+    # Regression: the plan was made once and never revisited, so "current
+    # position" meant wherever the viewer happened to be when the axis was
+    # switched, and Run used that stale slice.
+    panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+    row._extra[0].value = "select"
+
+    panel._viewer.dims.set_current_step(0, 3)
+    assert row.plan.select == ((0, 3),)
+    assert "z=3" in row.plan.summary
+
+    panel._viewer.dims.set_current_step(0, 1)
+    assert row.plan.select == ((0, 1),)
+    assert "z=1" in row.plan.summary
+
+
+def test_moving_the_slider_leaves_a_position_free_plan_alone(panel):
+    # The default plan iterates, so it says the same thing wherever the
+    # sliders are; re-planning per slider step would be churn for nothing.
+    panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    before = _row(panel).plan
+
+    panel._viewer.dims.set_current_step(0, 3)
+    assert _row(panel).plan is before
+
+
+def test_remapping_the_slots_processes_cross_sections(panel):
+    # The point of the mapping controls: feed the op ZY planes instead of YX
+    # ones, and iterate over x. One combo per slot, set independently.
+    panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+
+    row._slots[0].value = 0  # y <- z; the old y axis falls out to leftover
+    assert row.plan.mapping == (0, 2)
+    assert row.plan.iterate == (1,)
+
+    row._slots[1].value = 1  # x <- y; now x is the leftover one
+    assert row.plan.mapping == (0, 1)
+    assert row.plan.iterate == (2,)
+    assert row.plan.output_axes == ("x", "z", "y")
+    assert row.warnings == (
+        "y is being fed the z axis",
+        "x is being fed the y axis",
+    )
+
+
+def test_remapping_onto_a_taken_axis_swaps_the_two(panel):
+    # Choosing an axis another slot already holds has to displace it; swapping
+    # is what a user means by dragging one onto the other.
+    panel._viewer.add_image(np.zeros((8, 6), dtype=np.float32), name="plane")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+
+    row._slots[0].value = 1  # y <- x, which slot x was holding
+
+    assert row.plan.mapping == (1, 0)
+    assert row.plan.iterate == ()
+
+
+def test_editing_the_axes_replans(panel):
+    panel._viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+
+    # A lifetime axis is not z, and skop has never heard of it -- which is
+    # fine, because an op that iterates does not need to know what it is.
+    row._axes.value = "lifetime y x"
+    assert row.plan.iterate == (0,)
+    assert row.plan.calls == 3
+
+
+def test_a_misaligned_mapping_warns_without_blocking_the_run(panel):
+    # What used to be refused outright. The op wanted y and x and is getting
+    # z and x; that is the user's call, so it runs and the panel says so.
+    panel._viewer.add_image(np.zeros((3, 8), dtype=np.float32), name="odd")
+    _choose(panel, "quadrants")
+    _row(panel)._axes.value = "z x"
+
+    assert panel._button.enabled
+    assert "Check: image: y is being fed the z axis" in panel._notes.value
+
+
+def test_labels_that_do_not_describe_the_array_block_the_run(panel):
+    # Naming fewer axes than the array has is one of the few things left that
+    # genuinely cannot be adapted, so it still disables Run and says why.
+    panel._viewer.add_image(np.zeros((3, 8), dtype=np.float32), name="plane")
+    _choose(panel, "quadrants")
+    _row(panel)._axes.value = "x"
+
+    assert not panel._button.enabled
+    assert "1 axis label(s)" in panel._notes.value
+
+
+def test_a_2d_op_runs_over_a_stack_and_labels_the_result(panel, qtbot):
+    viewer = panel._viewer
+    viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
+    result = viewer.layers["result [quadrants]"]
+    assert type(result).__name__ == "Labels"
+    # One call per plane, stacked back up, with label IDs made unique.
+    assert result.data.shape == (3, 8, 6)
+    assert result.data.max() == 12
+    # Stamped, so the next op run against this layer does not guess.
+    assert result.metadata["skop_axes"] == ("z", "y", "x")
+    assert tuple(result.axis_labels) == ("z", "y", "x")
+
+
+def test_choosing_the_current_position_runs_once(panel, qtbot):
+    viewer = panel._viewer
+    viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    _row(panel)._extra[0].value = "select"
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
+    assert viewer.layers["result [quadrants]"].data.shape == (8, 6)
+
+
+def test_a_remapped_run_processes_cross_sections(panel, qtbot):
+    viewer = panel._viewer
+    viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    row = _row(panel)
+    row._slots[0].value = 0  # y <- z
+    row._slots[1].value = 1  # x <- y, so the op sees ZY planes and x is spare
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
+    result = viewer.layers["result [quadrants]"]
+    assert result.data.shape == (6, 5, 8)
+    # Stamped in the caller's own vocabulary, remapping and all.
+    assert tuple(result.axis_labels) == ("x", "z", "y")

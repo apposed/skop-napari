@@ -43,15 +43,14 @@ def test_scalar_outputs_are_not_layers():
 
 
 def test_builds_a_widget_per_input(qtbot):
-    from skop.ops.segment import stardist2d
+    from skop.ops.segment import stardist2d_fluo
 
-    spec = skop.spec(stardist2d)
+    spec = skop.spec(stardist2d_fluo)
     inputs = build_inputs(spec, annotation_for)
 
     assert inputs.runnable
     assert [w.name for w in inputs.widgets] == [
         "image",
-        "model",
         "prob_thresh",
         "nms_thresh",
         "normalize",
