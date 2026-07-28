@@ -437,3 +437,38 @@ def test_a_remapped_run_processes_cross_sections(panel, qtbot):
     assert result.data.shape == (6, 5, 8)
     # Stamped in the caller's own vocabulary, remapping and all.
     assert tuple(result.axis_labels) == ("x", "z", "y")
+
+
+def test_boxes_are_reshaped_but_never_axis_labelled(panel):
+    """The seam between the two jobs the panel does to an output.
+
+    ``layer_args_for`` adapts data to the layout napari wants; ``_layer_args``
+    names the layer and stamps its axes. They meet on the box detectors'
+    output, and the stamp must not land on it: a Shapes layer's dimensions are
+    coordinates, not image axes, so labelling them 'y' and 'x' would be a lie
+    the next op run would then read back.
+
+    Guarded because the two were reconciled in a merge, and the thing that
+    makes it work is indirect -- reshaping (N, 4) to (N, 2, 2) is what stops
+    the axis count matching.
+    """
+    from skop import OutputSpec, Role
+    from skop_napari._roles import layer_args_for
+
+    boxes = np.array([[1.0, 2.0, 5.0, 6.0], [3.0, 4.0, 9.0, 8.0]], dtype=np.float32)
+    output = OutputSpec(name="boxes", type=np.ndarray, role=Role.shapes)
+
+    data, extra = layer_args_for(output, boxes)
+    assert data.shape == (2, 2, 2)
+    assert extra["shape_type"] == "rectangle"
+
+    # Two axes, which is exactly what the raw (N, 4) array's ndim would have
+    # matched -- so this is the case that would mislabel if the adapted data
+    # were not what gets asked about.
+    panel._output_axes = ("y", "x")
+    args = panel._layer_args("boxes [detector]", data)
+    args.update(extra)
+
+    assert args["name"] == "boxes [detector]"
+    assert "axis_labels" not in args
+    assert "metadata" not in args
