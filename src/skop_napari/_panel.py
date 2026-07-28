@@ -463,10 +463,14 @@ class OpsPanel(Container):
         Stamping the result closes the loop: the next op run against this
         layer reads its axes off rung one instead of guessing again, and the
         viewer's sliders are labelled 'z' rather than '-3'.
+
+        Only a complete answer is stamped. Half of one would leave napari
+        showing a blank slider label, and would come back on the next run as a
+        declaration nobody made.
         """
         args: dict[str, Any] = {"name": name}
         axes = getattr(self, "_output_axes", ())
-        if axes and len(axes) == getattr(value, "ndim", -1):
+        if axes and all(axes) and len(axes) == getattr(value, "ndim", -1):
             args["metadata"] = {METADATA_KEY: tuple(axes)}
             args["axis_labels"] = tuple(axes)
         return args

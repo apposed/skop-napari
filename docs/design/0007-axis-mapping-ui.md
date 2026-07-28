@@ -1,9 +1,10 @@
 # 0007 — The axis mapping UI
 
 Supersedes [0006](0006-axis-awareness.md)'s "the choice is a combo box"
-section. Everything else in 0006 — the four resolution rungs, writing the
-answer back onto the layer, and the rule that convention may only invent axis
-names no op consumes — stands unchanged, and matters more than ever.
+section. Everything else in 0006 — the resolution rungs, writing the answer
+back onto the layer, and the rule that convention may only invent axis names no
+op consumes — stands unchanged, and matters more than ever. (Rung four itself
+went later, in [0008](0008-naming-less-and-looking-more.md).)
 
 ## What changed underneath
 

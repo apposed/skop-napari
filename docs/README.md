@@ -21,8 +21,9 @@ to change the panel and wants to know which of its oddities are load-bearing.
 | [0003](design/0003-building-input-widgets.md) | One parameter at a time, and surviving the ones that fail |
 | [0004](design/0004-running-off-the-gui-thread.md) | Threads, cancellation, and outliving the widget |
 | [0005](design/0005-reporting-through-napari.md) | Errors, build progress, and the bug that ate every output |
-| [0006](design/0006-axis-awareness.md) | Guessing a layer's axes (adaptation UI superseded by 0007) |
+| [0006](design/0006-axis-awareness.md) | Guessing a layer's axes (adaptation UI superseded by 0007, rung four by 0008) |
 | [0007](design/0007-axis-mapping-ui.md) | Editing the axis mapping, and warning instead of forbidding |
+| [0008](design/0008-naming-less-and-looking-more.md) | Leaving axes unnamed, and mapping from what the viewer displays |
 
 ## Spec
 

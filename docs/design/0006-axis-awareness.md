@@ -1,11 +1,14 @@
 # 0006 — Axis awareness
 
-> **Superseded in part by [0007](0007-axis-mapping-ui.md).** The "choice is a
-> combo box" section below described picking from `skop.plans()`, which no
-> longer exists: skop now returns one editable plan, and the panel shows a
-> mapping per slot plus a disposition per leftover axis. The four resolution
-> rungs, the write-back, and the "convention only invents names no op consumes"
-> rule are unchanged and still the heart of this document.
+> **Superseded in part by [0007](0007-axis-mapping-ui.md) and
+> [0008](0008-naming-less-and-looking-more.md).** The "choice is a combo box"
+> section below described picking from `skop.plans()`, which no longer exists:
+> skop now returns one editable plan, and the panel shows a mapping per slot
+> plus a disposition per leftover axis (0007). And rung four is gone: nothing
+> invents axis names any more, and the viewer's layout it read has become a
+> mapping rather than a naming (0008) — which is that rule's argument taken to
+> its conclusion, since the safest name to invent turned out to be none. The
+> first three rungs and the write-back stand.
 
 ## The problem
 

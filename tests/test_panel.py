@@ -266,19 +266,64 @@ def test_a_stack_maps_its_inner_axes_and_offers_the_rest(panel):
     _choose(panel, "quadrants")
 
     row = _row(panel)
-    # The axes were resolved from the viewer's layout, and written back so
-    # the next run reads them off the layer instead of guessing again.
-    assert row._axes.value == "z y x"
-    assert panel._viewer.layers["stack"].metadata["skop_axes"] == ("z", "y", "x")
+    # Nobody named these axes, so nobody pretends to have: they keep the names
+    # napari gives them, and nothing is written back onto the layer.
+    assert row._axes.value == "-3 -2 -1"
+    assert "skop_axes" not in panel._viewer.layers["stack"].metadata
 
-    # y and x filled by name; z is left over, with a control of its own.
+    # y and x filled from the plane the viewer is showing; the slider axis is
+    # left over, with a control of its own.
     assert row.plan.mapping == (1, 2)
     assert [c.value for c in row._slots] == [1, 2]
-    assert [c.label for c in row._extra] == ["z"]
+    assert [c.label for c in row._extra] == ["-3"]
     # The default keeps everything, so nothing needs confirming.
     assert row.plan.lossless
     assert row.plan.iterate == (0,)
+    # An unnamed axis makes no claim, so feeding it to y is nothing to warn of.
     assert row.warnings == ()
+
+
+def test_the_displayed_plane_fills_the_spatial_slots(panel):
+    # The heuristic's whole remaining job: whatever the user has rolled to the
+    # front is what the op gets, names or no names.
+    panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    assert _row(panel).plan.mapping == (1, 2)
+
+    panel._viewer.dims.order = (1, 2, 0)  # axes 2 and 0 on screen, 1 sliding
+    panel._replan()
+
+    row = _row(panel)
+    assert row.plan.mapping == (2, 0)
+    assert row.plan.iterate == (1,)
+
+
+def test_the_displayed_plane_outranks_the_axis_names(panel):
+    # Somebody who has rolled the dims round to look at the zx plane means to
+    # run on the zx plane. skop says so in a warning rather than refusing.
+    layer = panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32))
+    layer.axis_labels = ("z", "y", "x")
+    _choose(panel, "quadrants")
+    assert _row(panel).plan.mapping == (1, 2)
+
+    panel._viewer.dims.order = (1, 0, 2)  # z and x displayed, y on the slider
+    panel._replan()
+
+    row = _row(panel)
+    assert row.plan.mapping == (0, 2)
+    assert row.warnings == ("y is being fed the z axis",)
+
+
+def test_a_3d_view_is_read_as_well(panel):
+    # Rung four only read the viewer in 2-D view, because it was after a
+    # plane. A 2-D op in a 3-D view takes the two innermost axes on screen.
+    panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
+    _choose(panel, "quadrants")
+    panel._viewer.dims.ndisplay = 3
+    panel._viewer.dims.order = (1, 0, 2)
+    panel._replan()
+
+    assert _row(panel).plan.mapping == (0, 2)
 
 
 def test_a_leftover_axis_can_be_switched_to_the_current_position(panel):
@@ -291,7 +336,7 @@ def test_a_leftover_axis_can_be_switched_to_the_current_position(panel):
     row._extra[0].value = "select"
 
     assert row.plan.select == ((0, 3),)
-    assert "z=3" in row.plan.summary
+    assert "axis 0=3" in row.plan.summary
     assert not row.plan.lossless
 
 
@@ -306,11 +351,10 @@ def test_moving_the_slider_moves_the_selected_position(panel):
 
     panel._viewer.dims.set_current_step(0, 3)
     assert row.plan.select == ((0, 3),)
-    assert "z=3" in row.plan.summary
 
     panel._viewer.dims.set_current_step(0, 1)
     assert row.plan.select == ((0, 1),)
-    assert "z=1" in row.plan.summary
+    assert "axis 0=1" in row.plan.summary
 
 
 def test_moving_the_slider_leaves_a_position_free_plan_alone(panel):
@@ -330,6 +374,7 @@ def test_remapping_the_slots_processes_cross_sections(panel):
     panel._viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
     _choose(panel, "quadrants")
     row = _row(panel)
+    row._axes.value = "z y x"  # named by hand, so the vocabulary is the user's
 
     row._slots[0].value = 0  # y <- z; the old y axis falls out to leftover
     assert row.plan.mapping == (0, 2)
@@ -405,7 +450,22 @@ def test_a_2d_op_runs_over_a_stack_and_labels_the_result(panel, qtbot):
     # One call per plane, stacked back up, with label IDs made unique.
     assert result.data.shape == (3, 8, 6)
     assert result.data.max() == 12
+    # Nobody named the input's axes, so nothing is stamped on the output: a
+    # made-up name would come back on the next run as a declaration.
+    assert "skop_axes" not in result.metadata
+
+
+def test_named_axes_are_stamped_onto_the_result(panel, qtbot):
+    viewer = panel._viewer
+    layer = viewer.add_image(np.zeros((3, 8, 6), dtype=np.float32), name="stack")
+    layer.axis_labels = ("z", "y", "x")
+    _choose(panel, "quadrants")
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
     # Stamped, so the next op run against this layer does not guess.
+    result = viewer.layers["result [quadrants]"]
     assert result.metadata["skop_axes"] == ("z", "y", "x")
     assert tuple(result.axis_labels) == ("z", "y", "x")
 
@@ -427,6 +487,7 @@ def test_a_remapped_run_processes_cross_sections(panel, qtbot):
     viewer.add_image(np.zeros((5, 8, 6), dtype=np.float32), name="stack")
     _choose(panel, "quadrants")
     row = _row(panel)
+    row._axes.value = "z y x"
     row._slots[0].value = 0  # y <- z
     row._slots[1].value = 1  # x <- y, so the op sees ZY planes and x is spare
 

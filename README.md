@@ -84,11 +84,13 @@ feed the op, and what becomes of the rest. skop supplies a default answer and
 flags where it looks doubtful, but forbids nothing — whether a stack should be
 processed plane by plane or whole is a property of the experiment, not of the
 op. This package works out what the layer's axes are in the first place — from
-its metadata, an xarray's dims, NGFF axes, napari's own `axis_labels` and
-`rgb`, or finally shape and viewer layout — and then lets the mapping be
-edited: a combo per slot, and iterate/current-position/hand-to-the-op per
-leftover axis. Every answer is written back onto the layer, and every result is
-stamped, so a session gets more certain as it goes.
+its metadata, an xarray's dims, NGFF axes, or napari's own `axis_labels` and
+`rgb` — and leaves unnamed whatever none of those say, which napari calls `-3`
+`-2` `-1` and so does the panel. The mapping is then seeded from the axes the
+viewer is displaying, whatever they are called, and edited: a combo per slot,
+and iterate/current-position/hand-to-the-op per leftover axis. Real names are
+written back onto the layer and stamped onto results, so a session gets more
+certain as it goes.
 
 **Errors go to napari, not into the panel.** An op fails in another process,
 running another interpreter, so the interesting part of the failure is that

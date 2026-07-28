@@ -29,10 +29,10 @@ from . import _axes
 #: Shown in a mapping combo for an optional slot nobody is filling.
 _NONE = "—"
 
-
-def _axis_label(axes: tuple[str, ...], index: int) -> str:
-    """One of the caller's axes, as a combo entry."""
-    return axes[index] or f"axis {index}"
+#: Slots that are about where something is in space, which is exactly what the
+#: viewer's displayed axes are about. Everything else -- c, t -- is about what
+#: the data means, which layout says nothing about.
+_SPATIAL = ("z", "y", "x")
 
 
 class _Row(Container):
@@ -45,7 +45,7 @@ class _Row(Container):
 
     def __init__(self, param: ParamSpec) -> None:
         self.param = param
-        self._override: tuple[str, ...] | None = None
+        self._override: tuple[str | None, ...] | None = None
         self._mapping: tuple[int | None, ...] | None = None
         self._dispositions: dict[int, str] | None = None
         self._seen: int | None = None
@@ -135,10 +135,10 @@ class _Row(Container):
         self._replan(fn, data, axes, viewer, note)
         self.visible = True
 
-    def _show_axes(self, axes: tuple[str, ...]) -> None:
+    def _show_axes(self, axes: tuple[str | None, ...]) -> None:
         self._updating = True
         try:
-            self._axes.value = " ".join(axes)
+            self._axes.value = " ".join(_axes.display(axes))
         finally:
             self._updating = False
 
@@ -146,20 +146,25 @@ class _Row(Container):
         self,
         fn: Any,
         data: Any,
-        axes: tuple[str, ...],
+        axes: tuple[str | None, ...],
         viewer: Any,
         note: str,
     ) -> None:
         try:
-            plan = skop.plan(
-                fn,
-                self.param.name,
-                data,
-                axes,
-                position=_axes.positions(axes, viewer),
-                mapping=self._mapping,
-                dispositions=self._dispositions,
-            )
+            plan = self._planned(fn, data, axes, viewer, self._mapping)
+            if self._mapping is None:
+                # Nobody has chosen by hand, so the viewer gets to: point the
+                # spatial slots at whatever is on screen. Re-planned rather
+                # than patched, because the mapping decides what is left over
+                # and hence what the dispositions apply to.
+                guided = _guided(
+                    plan.mapping,
+                    self.param.axes.slots,
+                    _axes.displayed(viewer, len(axes)),
+                    len(axes),
+                )
+                if guided != plan.mapping:
+                    plan = self._planned(fn, data, axes, viewer, guided)
         except ValueError as exc:
             # An array that cannot satisfy the op at all: the wrong number of
             # labels, or fewer axes than the op consumes. The user's move is
@@ -178,10 +183,28 @@ class _Row(Container):
         self._warn.value = "; ".join(plan.warnings)
         self._render(plan, axes, tuple(data.shape))
 
+    def _planned(
+        self,
+        fn: Any,
+        data: Any,
+        axes: tuple[str | None, ...],
+        viewer: Any,
+        mapping: tuple[int | None, ...] | None,
+    ) -> AdaptationPlan:
+        return skop.plan(
+            fn,
+            self.param.name,
+            data,
+            axes,
+            position=_axes.positions(axes, viewer),
+            mapping=mapping,
+            dispositions=self._dispositions,
+        )
+
     # -- the controls -----------------------------------------------------
 
     def _render(
-        self, plan: AdaptationPlan, axes: tuple[str, ...], shape: tuple[int, ...]
+        self, plan: AdaptationPlan, axes: tuple[str | None, ...], shape: tuple[int, ...]
     ) -> None:
         """Rebuild the mapping and disposition combos to match *plan*.
 
@@ -193,7 +216,10 @@ class _Row(Container):
         try:
             self._slots.clear()
             self._extra.clear()
-            choices = [(_axis_label(axes, i), i) for i in range(len(axes))]
+            # Unnamed axes are offered under the names napari gives them, so
+            # that a combo entry and a slider label say the same thing.
+            shown = _axes.display(axes)
+            choices = [(shown[i], i) for i in range(len(axes))]
 
             for index, slot in enumerate(self.param.axes.slots):
                 combo = ComboBox(
@@ -227,10 +253,10 @@ class _Row(Container):
                 )
                 combo = ComboBox(
                     name=f"{self.param.name}_extra{i}",
-                    label=f"{_axis_label(axes, i)}",
+                    label=shown[i],
                     choices=options,
                     value=current,
-                    tooltip=f"What to do with the {_axis_label(axes, i)} axis, "
+                    tooltip=f"What to do with the {shown[i]} axis, "
                     "which the op does not consume.",
                 )
                 combo.changed.connect(
@@ -262,6 +288,56 @@ class _Row(Container):
         chosen[axis] = value
         self._dispositions = chosen
         self.edited.emit()
+
+
+def _guided(
+    mapping: tuple[int | None, ...],
+    slots: tuple[Any, ...],
+    displayed: tuple[int, ...],
+    naxes: int,
+) -> tuple[int | None, ...]:
+    """Point the op's spatial slots at the axes the viewer is displaying.
+
+    Which axes are on screen is a fact about what the user is looking at, and
+    it outranks a name: somebody who has rolled the dims round to look at the
+    zx plane means to run on the zx plane, whatever the axes are called. skop
+    says so in a warning rather than refusing, which is the right volume for
+    it -- and in the ordinary view, where nobody has rolled anything, layout
+    and names agree and this changes nothing.
+
+    Both lists are right-aligned, innermost last, so a 2-D op in a 3-D view
+    takes the two innermost displayed axes, and a 3-D op in a 2-D view keeps
+    its z from wherever the names put it.
+    """
+    spatial = [s for s, slot in enumerate(slots) if slot.name in _SPATIAL]
+    count = min(len(spatial), len(displayed))
+    if not count:
+        return mapping
+
+    forced = dict(zip(spatial[-count:], displayed[-count:]))
+    new = list(mapping)
+    for slot, axis in forced.items():
+        new[slot] = axis
+
+    used = set(forced.values())
+    for slot in range(len(new)):
+        if slot in forced or new[slot] is None:
+            continue
+        if new[slot] not in used:
+            used.add(new[slot])
+            continue
+        # Something else was holding an axis that is now on screen. An
+        # optional slot goes empty rather than being handed an axis it never
+        # asked for -- filling c by position is exactly what skop design 0006
+        # forbids -- and a required one takes whatever is still going.
+        free = next((i for i in range(naxes) if i not in used), None)
+        new[slot] = None if slots[slot].optional else free
+        if new[slot] is not None:
+            used.add(new[slot])
+
+    if any(index is None and not slot.optional for slot, index in zip(slots, new)):
+        return mapping  # Nothing gained by handing skop a mapping it refuses.
+    return tuple(new)
 
 
 def _reassign(
