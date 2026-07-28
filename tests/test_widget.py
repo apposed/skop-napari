@@ -163,3 +163,42 @@ def test_resolve_finds_the_op_function():
     from skop_napari._run import resolve
 
     assert resolve(skop.spec(toy.add)) is toy.add
+
+
+def test_shapes_inputs_are_converted_from_what_a_layer_holds(qtbot):
+    """The bug this exists for: a Shapes layer's data is not (N, 4).
+
+    napari hands over one (V, 2) vertex array per shape. A mask detector that
+    asked for (N, 4) boxes was getting (11, 4, 2) and refusing it in the
+    worker, several seconds and one model load later.
+    """
+    from skop import Role
+    from skop.ops.mask import mobilesam_masks
+    from skop_napari._roles import value_for
+
+    boxes_param = next(
+        p for p in skop.spec(mobilesam_masks).params if p.name == "boxes"
+    )
+    assert boxes_param.role is Role.shapes
+
+    # Exactly what napari gives: a list of rectangles, four corners each.
+    layer_data = [
+        np.array([[20, 10], [20, 30], [40, 30], [40, 10]], dtype=np.float32),
+        np.array([[0, 0], [0, 5], [5, 5], [5, 0]], dtype=np.float32),
+    ]
+    converted = value_for(boxes_param, layer_data)
+    assert converted.shape == (2, 4)
+    assert converted.tolist() == [[20, 10, 40, 30], [0, 0, 5, 5]]
+
+
+def test_canonical_boxes_pass_through_unconverted(qtbot):
+    # An op called with boxes from somewhere other than a layer must not be
+    # converted twice.
+    from skop.ops.mask import mobilesam_masks
+    from skop_napari._roles import value_for
+
+    boxes_param = next(
+        p for p in skop.spec(mobilesam_masks).params if p.name == "boxes"
+    )
+    canonical = np.array([[20, 10, 40, 30]], dtype=np.float32)
+    assert value_for(boxes_param, canonical) is canonical

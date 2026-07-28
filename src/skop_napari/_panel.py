@@ -19,6 +19,7 @@ import napari.viewer
 from magicgui.widgets import (
     ComboBox,
     Container,
+    FloatSpinBox,
     Label,
     LineEdit,
     ProgressBar,
@@ -29,11 +30,20 @@ from napari.utils.notifications import notification_manager, show_error
 from psygnal import Signal
 from superqt.utils import ensure_main_thread
 
-from skop import OpSpec, Runner, discover
+from skop import OpSpec, Role, Runner, discover
 
 from ._axes import METADATA_KEY
 from ._plans import Adaptations
-from ._roles import annotation_for, layer_args_for, layer_type_for
+from ._roles import (
+    DEFAULT_MASK_VIEW,
+    DEFAULT_Z_SPACING,
+    MASK_VIEWS,
+    annotation_for,
+    is_stack_view,
+    layer_args_for,
+    layer_type_for,
+    value_for,
+)
 from ._run import OpRun, outputs_of, resolve
 from ._widget import Inputs, build_inputs
 
@@ -131,6 +141,38 @@ class OpsPanel(Container):
         self._doc = Label(value="")
         self._inputs_box = Container(labels=True)
         self._adapt = Adaptations()
+        # How to show a mask collection. A display choice rather than an op
+        # parameter: nothing about it reaches the model, and re-showing a
+        # result a different way should not mean running SAM again. Hidden
+        # unless the chosen op actually produces masks.
+        self._mask_view = ComboBox(
+            name="mask_view",
+            label="show masks as",
+            choices=list(MASK_VIEWS),
+            value=DEFAULT_MASK_VIEW,
+            visible=False,
+            tooltip=(
+                "Masks may overlap, so no single label image can show all of "
+                "them. Project to 2-D and pick who wins a contested pixel, or "
+                "keep the 3-D stack, which loses nothing."
+            ),
+        )
+        # Only meaningful for the 3-D stack, so it follows the chooser.
+        self._z_spacing = FloatSpinBox(
+            name="z_spacing",
+            label="stack spacing",
+            value=DEFAULT_Z_SPACING,
+            min=0.1,
+            max=1000.0,
+            step=1.0,
+            visible=False,
+            tooltip=(
+                "How far apart to draw the planes of the 3-D stack, relative "
+                "to a pixel. The axis is an object index rather than a depth, "
+                "so there is no true value -- at 1 a handful of masks is a "
+                "pancake and rotating it shows nothing."
+            ),
+        )
         self._notes = Label(value="")
         self._button = PushButton(text="Run")
         self._cancel = PushButton(text="Cancel", visible=False)
@@ -143,6 +185,8 @@ class OpsPanel(Container):
                 self._doc,
                 self._inputs_box,
                 self._adapt,
+                self._mask_view,
+                self._z_spacing,
                 self._notes,
                 self._button,
                 self._cancel,
@@ -153,6 +197,7 @@ class OpsPanel(Container):
         )
 
         self._picker.changed.connect(self._select)
+        self._mask_view.changed.connect(self._show_z_spacing)
         self._button.changed.connect(self._start)
         self._cancel.changed.connect(self._stop)
 
@@ -192,9 +237,12 @@ class OpsPanel(Container):
         summary = (spec.doc or "").strip().splitlines()
         self._doc.value = summary[0] if summary else ""
 
-        self._inputs: Inputs = build_inputs(spec, annotation_for)
+        self._inputs: Inputs = build_inputs(spec, annotation_for, value_for)
         self._inputs_box.clear()
         self._inputs_box.extend(self._inputs.widgets)
+
+        self._mask_view.visible = self._makes_masks()
+        self._show_z_spacing()
 
         adaptable = self._adapt.rebuild(spec)
         # Which array is selected decides what can be done with it, so the
@@ -208,6 +256,21 @@ class OpsPanel(Container):
 
         self._results.clear()
         self._results.visible = False
+
+    def _makes_masks(self) -> bool:
+        return any(output.role is Role.masks for output in self.spec.output_specs)
+
+    def _show_z_spacing(self) -> None:
+        """Offer the stack spacing only when a stack is what will be made.
+
+        Asked of the spec rather than of ``self._mask_view.visible``: that
+        reads Qt's idea of visibility, which is False for every widget of an
+        unshown parent, so gating on it would make this depend on whether the
+        panel happened to be painted yet.
+        """
+        self._z_spacing.visible = self._makes_masks() and is_stack_view(
+            self._mask_view.value
+        )
 
     def _replan(self) -> None:
         """Re-resolve axes and re-plan, then say whether the op can run."""
@@ -371,7 +434,9 @@ class OpsPanel(Container):
                 # of image space stop matching the image's axis count and are
                 # correctly left unlabelled -- a Shapes layer's dimensions are
                 # coordinates, not axes.
-                data, extra = layer_args_for(output, value)
+                data, extra = layer_args_for(
+                    output, value, self._mask_view.value, self._z_spacing.value
+                )
                 args = self._layer_args(name, data)
                 args.update(extra)
                 self._viewer.add_layer(Layer.create(data, args, layer_type))

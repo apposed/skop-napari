@@ -1,10 +1,11 @@
 """Turning an OpSpec into magicgui input widgets.
 
-Nothing here imports napari. The one napari-shaped thing a caller must supply
-is ``annotation_for``, which says what type each parameter should be rendered
-as; ``_roles.annotation_for`` is the napari answer, and a different front end
-would pass a different one. If skop ever grows a second magicgui host, this
-module is what moves.
+Nothing here imports napari. The two napari-shaped things a caller must supply
+are ``annotation_for``, which says what type each parameter should be rendered
+as, and ``value_for``, which converts what the resulting widget holds into
+what the op asked for. ``_roles`` has the napari answers, and a different
+front end would pass different ones. If skop ever grows a second magicgui
+host, this module is what moves.
 
 Widgets are built one parameter at a time rather than by handing magicgui a
 whole synthesized function, because ops in the wild contain parameters
@@ -25,6 +26,11 @@ from magicgui.widgets import Widget, create_widget
 from skop import OpSpec, ParamSpec
 
 
+def _unconverted(param: ParamSpec, value: Any) -> Any:
+    """The default conversion: none at all."""
+    return value
+
+
 @dataclass
 class Inputs:
     """The renderable inputs of an op, and what had to be left out."""
@@ -36,6 +42,12 @@ class Inputs:
     #: Parameters magicgui could not render and which have no default. The
     #: op cannot be run from a GUI at all.
     blocking: list[tuple[str, str]] = field(default_factory=list)
+    #: The spec behind each widget, kept so that values() can ask what a
+    #: parameter meant rather than guessing from what the widget holds.
+    params: dict[str, ParamSpec] = field(default_factory=dict)
+    #: How to turn a widget's value into what the op wants. Supplied by the
+    #: front end, because the layout a widget holds is the front end's.
+    convert: Callable[[ParamSpec, Any], Any] = _unconverted
 
     @property
     def runnable(self) -> bool:
@@ -43,17 +55,23 @@ class Inputs:
 
     def values(self) -> dict[str, Any]:
         """The arguments to call the op with, as currently filled in."""
-        return {w.name: w.value for w in self.widgets}
+        return {
+            w.name: self.convert(self.params[w.name], w.value) for w in self.widgets
+        }
 
 
-def build_inputs(spec: OpSpec, annotation_for: Callable[[ParamSpec], Any]) -> Inputs:
+def build_inputs(
+    spec: OpSpec,
+    annotation_for: Callable[[ParamSpec], Any],
+    value_for: Callable[[ParamSpec, Any], Any] = _unconverted,
+) -> Inputs:
     """Build one widget per input parameter of *spec*.
 
     ``Out`` parameters are skipped: they are buffers the caller allocates, and
     a user is never asked for one.
     """
     docs = param_docs(spec.doc)
-    inputs = Inputs()
+    inputs = Inputs(convert=value_for)
 
     for param in spec.inputs:
         options = dict(param.ui)
@@ -81,6 +99,7 @@ def build_inputs(spec: OpSpec, annotation_for: Callable[[ParamSpec], Any]) -> In
             continue
 
         inputs.widgets.append(widget)
+        inputs.params[param.name] = param
 
     return inputs
 

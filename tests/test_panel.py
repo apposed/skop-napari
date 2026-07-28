@@ -472,3 +472,117 @@ def test_boxes_are_reshaped_but_never_axis_labelled(panel):
     assert args["name"] == "boxes [detector]"
     assert "axis_labels" not in args
     assert "metadata" not in args
+
+
+def test_shapes_layer_data_reaches_an_op_as_canonical_boxes(panel):
+    """The whole input side of the boxes contract, through a real layer.
+
+    A Shapes layer holds one (V, 2) vertex array per shape; skop's ops want
+    (N, 4) rows of [min_y, min_x, max_y, max_x]. Without the conversion the op
+    fails inside the worker, after a model load, with a shape error.
+    """
+    viewer = panel._viewer
+    viewer.add_image(np.zeros((64, 64), dtype=np.uint8), name="img")
+    viewer.add_shapes(
+        [
+            np.array([[10.0, 20.0], [10.0, 40.0], [30.0, 40.0], [30.0, 20.0]]),
+            np.array([[0.0, 0.0], [0.0, 5.0], [5.0, 5.0], [5.0, 0.0]]),
+        ],
+        shape_type="rectangle",
+        name="prompts",
+    )
+
+    _choose(panel, "mobilesam_masks")
+    boxes = panel._inputs.values()["boxes"]
+
+    assert boxes.shape == (2, 4)
+    assert boxes.tolist() == [[10, 20, 30, 40], [0, 0, 5, 5]]
+
+
+def test_the_mask_view_chooser_appears_only_for_ops_that_return_masks(panel):
+    # NB: asserted on magicgui's intent flag, not on .visible. The panel is
+    # docked into a viewer window that tests never show, so Qt reports every
+    # widget in it as invisible no matter what the panel asked for.
+    _choose(panel, "otsu")
+    assert panel._mask_view._explicitly_hidden
+
+    _choose(panel, "mobilesam_masks")
+    assert not panel._mask_view._explicitly_hidden
+
+
+def test_mask_outputs_are_projected_the_way_the_chooser_says(panel):
+    from skop import OutputSpec, Role
+    from skop_napari._roles import layer_args_for, layer_type_for
+
+    # A big mask with a small one drawn inside it: the case the projection
+    # strategies actually differ on.
+    stack = np.zeros((2, 10, 10), dtype=np.uint8)
+    stack[0, 0:8, 0:8] = 1
+    stack[1, 2:5, 2:5] = 1
+    output = OutputSpec(name="masks", type=np.ndarray, role=Role.masks)
+
+    # Whichever projection is chosen, it is a Labels layer at the end.
+    assert layer_type_for(output) == "labels"
+
+    nested, _ = layer_args_for(output, stack, "2D labels (nested objects on top)")
+    assert nested.shape == (10, 10)
+    # The small mask is drawn over the big one, so both objects appear.
+    assert nested[3, 3] == 2
+    assert set(np.unique(nested)) == {0, 1, 2}
+
+    largest, _ = layer_args_for(output, stack, "2D labels (largest object on top)")
+    assert largest[3, 3] == 1
+    # And the nested object is gone entirely -- the cost of this strategy,
+    # asserted so nobody has to rediscover it.
+    assert set(np.unique(largest)) == {0, 1}
+
+    stacked, _ = layer_args_for(output, stack, "3D stack (nothing lost)")
+    # Nothing lost: the contested pixel is on both planes, with both labels.
+    assert stacked.shape == (2, 10, 10)
+    assert stacked[0][3, 3] == 1
+    assert stacked[1][3, 3] == 2
+
+
+def test_the_3d_stack_gets_an_adjustable_z_spacing(panel):
+    """The stack's first axis is an object index, so its spacing is a choice.
+
+    At 1 a handful of masks over a wide image is a pancake and rotating it
+    shows nothing, which is what the default of 10 is for. y and x stay at 1,
+    matching the image the masks were found in.
+    """
+    from skop import OutputSpec, Role
+    from skop_napari._roles import layer_args_for
+
+    stack = np.zeros((3, 10, 10), dtype=np.uint8)
+    stack[0, 0:8, 0:8] = 1
+    stack[1, 2:5, 2:5] = 1
+    stack[2, 6:9, 6:9] = 1
+    output = OutputSpec(name="masks", type=np.ndarray, role=Role.masks)
+
+    _, extra = layer_args_for(output, stack, "3D stack (nothing lost)")
+    assert extra["scale"] == (10.0, 1.0, 1.0)
+
+    _, extra = layer_args_for(output, stack, "3D stack (nothing lost)", 2.5)
+    assert extra["scale"] == (2.5, 1.0, 1.0)
+
+    # A 2-D projection has no third axis to space out.
+    _, extra = layer_args_for(output, stack, "2D labels (nested objects on top)")
+    assert "scale" not in extra
+
+
+def test_the_spacing_spinner_follows_the_view_chooser(panel):
+    # NB: on magicgui's intent flag rather than .visible -- see the chooser
+    # test above for why.
+    _choose(panel, "otsu")
+    assert panel._z_spacing._explicitly_hidden
+
+    _choose(panel, "mobilesam_masks")
+    # Defaults to a 2-D projection, which has no spacing to set.
+    assert panel._z_spacing._explicitly_hidden
+
+    panel._mask_view.value = "3D stack (nothing lost)"
+    assert not panel._z_spacing._explicitly_hidden
+    assert panel._z_spacing.value == 10.0
+
+    panel._mask_view.value = "2D labels (largest object on top)"
+    assert panel._z_spacing._explicitly_hidden
