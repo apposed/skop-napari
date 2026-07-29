@@ -48,32 +48,52 @@ class Inputs:
     #: How to turn a widget's value into what the op wants. Supplied by the
     #: front end, because the layout a widget holds is the front end's.
     convert: Callable[[ParamSpec, Any], Any] = _unconverted
+    #: Value sources that are not a single widget holding a single parameter
+    #: -- the chooser groups a workflow gets. Each supplies a slice of the
+    #: call through ``contribution()`` and reports its own ``runnable``.
+    #: Duck-typed rather than imported, because the module that builds them
+    #: builds on this one.
+    extra: list[Any] = field(default_factory=list)
 
     @property
     def runnable(self) -> bool:
-        return not self.blocking
+        # A chosen sub-op with an unrenderable required input stops the
+        # workflow just as surely as one of the workflow's own would.
+        return not self.blocking and all(group.runnable for group in self.extra)
 
     def values(self) -> dict[str, Any]:
         """The arguments to call the op with, as currently filled in."""
-        return {
-            w.name: self.convert(self.params[w.name], w.value) for w in self.widgets
+        # A widget with no ParamSpec is one of the composite widgets above,
+        # laid out here but reporting its value through `extra`.
+        args = {
+            w.name: self.convert(self.params[w.name], w.value)
+            for w in self.widgets
+            if w.name in self.params
         }
+        for group in self.extra:
+            args.update(group.contribution())
+        return args
 
 
 def build_inputs(
     spec: OpSpec,
     annotation_for: Callable[[ParamSpec], Any],
     value_for: Callable[[ParamSpec, Any], Any] = _unconverted,
+    skip: Callable[[ParamSpec], bool] | None = None,
 ) -> Inputs:
     """Build one widget per input parameter of *spec*.
 
     ``Out`` parameters are skipped: they are buffers the caller allocates, and
-    a user is never asked for one.
+    a user is never asked for one. A caller may skip more through *skip* --
+    which is how a workflow leaves out the parameters it fills in itself, and
+    how the sub-op parameters it binds are kept off the panel.
     """
     docs = param_docs(spec.doc)
     inputs = Inputs(convert=value_for)
 
     for param in spec.inputs:
+        if skip is not None and skip(param):
+            continue
         options = dict(param.ui)
         widget_type = options.pop("widget_type", None)
         if "tooltip" not in options and param.name in docs:

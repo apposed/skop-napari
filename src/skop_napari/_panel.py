@@ -6,6 +6,12 @@ so a per-op contribution would mean generating the manifest at build time and
 losing the ability to drop a new op into the collection and see it appear.
 The napari team is working on dynamic registration; when it lands, this file
 is what gets split up.
+
+There are two widgets, not one, and the second is what gets skop-napari a
+submenu: napari builds ``Plugins > scikit-ops > ...`` as soon as a plugin
+contributes more than one widget, and leaves a single one flat. Ops and
+workflows are the split worth having -- a workflow is an op, so one class
+serves both, differing only in which half of the collection it offers.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ from superqt.utils import ensure_main_thread
 from skop import OpSpec, Role, Runner, discover
 
 from ._axes import METADATA_KEY
+from ._choices import is_workflow_plumbing, stages_for
 from ._plans import Adaptations
 from ._roles import (
     DEFAULT_MASK_VIEW,
@@ -73,11 +80,27 @@ _LOG_RECORD = re.compile(r"^\s*(TRACE|DEBUG|INFO|WARN|WARNING|ERROR)\b")
 
 
 def _label_for(spec: OpSpec) -> str:
-    """A human-facing name for an op, e.g. 'segment: stardist2d'."""
-    namespace = spec.module.removeprefix("skop.ops.").split(".")[0]
+    """A human-facing name for an op, e.g. 'segment: stardist2d'.
+
+    The ``workflows.`` prefix is stripped rather than shown. Workflows live in
+    their own tree so that a person reading the source can see what has been
+    assembled, but they have their own panel here, where saying "workflows" on
+    every row is noise. What survives is the domain underneath it, which is
+    what the label is for: 'mask: detect_then_mask' sits next to the mask ops
+    it belongs with.
+    """
+    path = spec.module.removeprefix("skop.ops.").removeprefix("workflows.")
+    namespace = path.split(".")[0]
     return (
         spec.function if namespace == spec.function else f"{namespace}: {spec.function}"
     )
+
+
+def _where(spec: OpSpec) -> str:
+    """Where an op will run, for the notes line."""
+    if spec.is_workflow:
+        return "Runs on the host; each stage runs in its own environment."
+    return f"Environment: {spec.env}"
 
 
 def _describe(value: Any) -> str:
@@ -101,6 +124,15 @@ class OpsPanel(Container):
     #: canceled. Ops finish on a worker thread, so this is how anything
     #: driving the panel from outside knows the outputs have landed.
     finished = Signal()
+
+    #: Which half of the collection this panel offers. Workflows are ops and
+    #: run through the same machinery, so the split is presentational: a
+    #: dropdown of sixty leaf ops is a bad place to find the four things
+    #: someone actually assembled, and vice versa.
+    shows_workflows = False
+
+    #: What the picker says when the filter leaves nothing.
+    empty_message = "No ops found."
 
     def __init__(
         self,
@@ -130,7 +162,11 @@ class OpsPanel(Container):
         self._run: OpRun | None = None
 
         self._specs, self._failures = discover()
-        self._by_label = {_label_for(s): s for s in self._specs}
+        self._by_label = {
+            _label_for(s): s
+            for s in self._specs
+            if s.is_workflow is self.shows_workflows
+        }
 
         self._picker = ComboBox(
             name="op",
@@ -140,6 +176,12 @@ class OpsPanel(Container):
         )
         self._doc = Label(value="")
         self._inputs_box = Container(labels=True)
+        # Workflow stages live in their own container, with labels off. A
+        # Container unifies its label column across every child, so a stage
+        # sharing _inputs_box would be indented by the widest parameter name
+        # in the panel -- 70px of a 425px dock, for a label its own heading
+        # already shows. Empty for an ordinary op.
+        self._stages_box = Container(labels=False)
         self._adapt = Adaptations()
         # How to show a mask collection. A display choice rather than an op
         # parameter: nothing about it reaches the model, and re-showing a
@@ -184,6 +226,7 @@ class OpsPanel(Container):
                 self._picker,
                 self._doc,
                 self._inputs_box,
+                self._stages_box,
                 self._adapt,
                 self._mask_view,
                 self._z_spacing,
@@ -222,7 +265,7 @@ class OpsPanel(Container):
         if self._by_label:
             self._select()
         else:
-            self._doc.value = "No ops found."
+            self._doc.value = self.empty_message
             self._button.enabled = False
 
     # -- op selection ----------------------------------------------------
@@ -237,9 +280,16 @@ class OpsPanel(Container):
         summary = (spec.doc or "").strip().splitlines()
         self._doc.value = summary[0] if summary else ""
 
-        self._inputs: Inputs = build_inputs(spec, annotation_for, value_for)
+        # A workflow's choosers are drawn as groups, so its own parameters
+        # skip them here and the groups are appended after.
+        self._inputs: Inputs = build_inputs(
+            spec, annotation_for, value_for, skip=is_workflow_plumbing
+        )
+        self._inputs.extra = stages_for(spec, annotation_for, value_for)
         self._inputs_box.clear()
         self._inputs_box.extend(self._inputs.widgets)
+        self._stages_box.clear()
+        self._stages_box.extend(self._inputs.extra)
 
         self._mask_view.visible = self._makes_masks()
         self._show_z_spacing()
@@ -297,13 +347,14 @@ class OpsPanel(Container):
             self._viewer.dims.events.current_step.disconnect(self._moved)
 
     def _notes_for(self, inputs: Inputs, spec: OpSpec) -> str:
-        notes = [f"Environment: {spec.env}"]
+        notes = [_where(spec)]
         if inputs.defaulted:
             names = ", ".join(name for name, _ in inputs.defaulted)
             notes.append(f"Not editable here, using defaults: {names}")
         if inputs.blocking:
             names = ", ".join(name for name, _ in inputs.blocking)
             notes.append(f"Cannot run: no widget for required input(s) {names}")
+        notes.extend(note for stage in inputs.extra for note in stage.notes())
         notes.extend(f"Cannot run: {problem}" for problem in self._adapt.problems)
         # Warnings never block a run. An op fed an axis it did not ask for is
         # the user's call to make; the panel's job is to make sure it is a
@@ -326,7 +377,11 @@ class OpsPanel(Container):
         self._progress.max = 0  # Indeterminate until the op says otherwise.
         # There is no "build started" event, and a first run can sit silent
         # for a while before pixi says anything, so say something ourselves.
-        self._progress.label = f"Preparing environment: {spec.env}"
+        self._progress.label = (
+            "Starting workflow"
+            if spec.is_workflow
+            else f"Preparing environment: {spec.env}"
+        )
 
         args = self._inputs.values()
         # Frozen for the duration of the run: the user is free to change the
@@ -505,3 +560,18 @@ class OpsPanel(Container):
         self._progress.visible = False
         self._progress.label = ""
         self.finished.emit()
+
+
+class WorkflowsPanel(OpsPanel):
+    """Runs any workflow in the collection.
+
+    The whole of the difference is which ops it lists. A workflow is an op --
+    it discovers, specs, renders and runs exactly like one -- so a second
+    class here would be a second protocol to no purpose. What it buys is the
+    submenu: napari nests a plugin's widgets under its own name only when the
+    plugin contributes more than one, so this is also what turns
+    ``Plugins > scikit-ops: Ops`` into ``Plugins > scikit-ops > ...``.
+    """
+
+    shows_workflows = True
+    empty_message = "No workflows found."

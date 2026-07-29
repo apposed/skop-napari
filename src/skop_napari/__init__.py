@@ -8,6 +8,6 @@ layer types their roles call for.
 
 from __future__ import annotations
 
-from ._panel import OpsPanel
+from ._panel import OpsPanel, WorkflowsPanel
 
-__all__ = ["OpsPanel"]
+__all__ = ["OpsPanel", "WorkflowsPanel"]
