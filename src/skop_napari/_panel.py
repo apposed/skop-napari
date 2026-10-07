@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import napari.viewer
@@ -112,6 +114,32 @@ def _describe(value: Any) -> str:
     if shape is not None:
         return f"{type(value).__name__}{tuple(shape)} {getattr(value, 'dtype', '')}"
     return repr(value)
+
+
+def _zarr_out_for(data: Any, plan: TilePlan) -> Any:
+    """Where a tiled run on a zarr puts its result: another zarr.
+
+    A run that has to be tiled has a result too big for memory, and an input
+    that is a zarr says zarr is what this user works in. So the result is
+    one too, in a temporary folder, chunked the way it is tiled, and shown
+    as lazily as the input was. Made once the result's dtype is known, which
+    is why this hands the runner a function rather than an array.
+
+    Any other input returns None, and the runner's own default stands.
+    """
+    if type(data).__module__.split(".")[0] != "zarr":
+        return None
+    import zarr
+
+    path = Path(tempfile.mkdtemp(prefix="skop-tiled-")) / "result.zarr"
+
+    def make(shape: tuple[int, ...], dtype: Any) -> Any:
+        chunks = tuple(min(c, n) for c, n in zip(plan.tile_shape, shape))
+        return zarr.open_array(
+            str(path), mode="w", shape=shape, dtype=dtype, chunks=chunks
+        )
+
+    return make
 
 
 def _size(n: int) -> str:
@@ -500,12 +528,14 @@ class OpsPanel(Container):
             self._progress.label = f"Preparing environment: {spec.env} ({calls} runs)"
 
         memory = self._budget()
+        out = None
         if self._tile_plan and self._tile_plan.calls > 1:
             _log.info(
                 "Tiling to fit %s: %s",
                 memory or "the default budget",
                 self._tile_plan.summary,
             )
+            out = _zarr_out_for(args.get(spec.tile[0]), self._tile_plan)
 
         self._run = OpRun(
             self._runner,
@@ -513,6 +543,7 @@ class OpsPanel(Container):
             args,
             plans=plans,
             memory=memory,
+            out=out,
             on_progress=self._on_progress,
             on_done=self._on_done,
             on_error=self._on_error,

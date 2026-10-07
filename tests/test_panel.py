@@ -692,6 +692,8 @@ def test_a_memory_budget_runs_the_op_in_tiles(panel, qtbot):
 
     result = next(layer for layer in panel._viewer.layers if "gaussian" in layer.name)
     assert result.data.shape == data.shape
+    # A numpy layer gets the runner's own default, not a zarr.
+    assert type(result.data).__module__.split(".")[0] != "zarr"
 
 
 def test_an_empty_budget_is_the_default_and_off_runs_whole(panel):
@@ -705,3 +707,25 @@ def test_an_empty_budget_is_the_default_and_off_runs_whole(panel):
     panel._memory.value = "off"
     assert panel._budget() == "off"
     assert panel._tiles._explicitly_hidden
+
+
+def test_a_tiled_run_on_a_zarr_writes_a_zarr(panel, qtbot, tmp_path):
+    zarr = pytest.importorskip("zarr")
+    data = np.random.default_rng(0).integers(0, 255, (24, 60, 80)).astype(np.uint8)
+    source = zarr.create_array(str(tmp_path / "in.zarr"), data=data, chunks=(4, 60, 80))
+    panel._viewer.add_image(source, name="volume")
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    panel._memory.value = "200K"
+    tile_shape = panel._tile_plan.tile_shape
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
+    result = next(layer for layer in panel._viewer.layers if "gaussian" in layer.name)
+    assert isinstance(result.data, zarr.Array)
+    assert result.data.chunks == tile_shape
+    # The same numbers an untiled run on plain numpy gives.
+    from skop.ops.smooth import gaussian
+
+    whole = panel._runner.run(gaussian, image=data, memory="off")
+    np.testing.assert_allclose(result.data[:], whole, rtol=0, atol=1e-5)
