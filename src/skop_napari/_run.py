@@ -41,7 +41,7 @@ class OpRun:
         memory: int | str | None = None,
         tiler: Any = None,
         out: Any = None,
-        on_progress: Callable[[str | None, int | None, int | None], None],
+        on_progress: Callable[..., None],
         on_done: Callable[[Any], None],
         on_error: Callable[[Exception], None],
         on_finish: Callable[[], None],
@@ -59,7 +59,12 @@ class OpRun:
         # dispatch, and drop anything that outlived its run.
         def relay(event: Any) -> None:
             if self._live:
-                on_progress(event.message, event.current, event.maximum)
+                on_progress(
+                    event.message,
+                    event.current,
+                    event.maximum,
+                    getattr(event, "tile", None),
+                )
 
         report = ensure_main_thread(relay)
 

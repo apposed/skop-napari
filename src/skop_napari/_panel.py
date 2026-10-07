@@ -159,6 +159,10 @@ def _zarr_out_for(data: Any, plan: TilePlan) -> Any:
     return make
 
 
+#: How many tiles a run shows a bar for at once. A big image may be
+#: hundreds of tiles; when this many are full, they are cleared.
+TILE_BARS = 4
+
 #: The overlap a workflow's plan is estimated with when the field is empty.
 #: The op's own overlap may come from a PSF the workflow makes partway
 #: through, after the panel has planned. The run uses the op's own, from the
@@ -360,6 +364,9 @@ class OpsPanel(Container):
         # built with labels=False, so magicgui never draws that.
         self._status = Label(value="", visible=False)
         self._progress = ProgressBar(visible=False, min=0, max=0)
+        # A tiled run's last few tiles, a bar each; the main bar counts tiles.
+        self._tile_bars = Container(labels=True, visible=False)
+        self._tile: tuple[int, int] | None = None
         self._results = Container(labels=True, visible=False)
 
         super().__init__(
@@ -378,6 +385,7 @@ class OpsPanel(Container):
                 self._cancel,
                 self._status,
                 self._progress,
+                self._tile_bars,
                 self._results,
             ],
             labels=False,
@@ -703,9 +711,34 @@ class OpsPanel(Container):
             self._run.cancel()
 
     def _on_progress(
-        self, message: str | None, current: int | None, maximum: int | None
+        self,
+        message: str | None,
+        current: int | None,
+        maximum: int | None,
+        tile: tuple[int, int] | None = None,
     ) -> None:
-        self._show_progress(message, current, maximum)
+        if tile is None:
+            self._show_progress(message, current, maximum)
+            return
+        try:
+            self._next_tile(*tile)
+        except RuntimeError:
+            if self._run is not None:  # closed mid-run; see _show_progress
+                self._run.detach()
+
+    def _next_tile(self, number: int, count: int) -> None:
+        """Start tile *number* of *count*: count it, and give it a bar."""
+        self._tile = (number, count)
+        self._progress.max = count
+        self._progress.value = number - 1
+        self._status.value = f"Tile {number} of {count}"
+        bars = self._tile_bars
+        if len(bars):
+            bars[-1].value = bars[-1].max  # tiles run one at a time
+        if len(bars) >= TILE_BARS:
+            bars.clear()
+        bars.append(ProgressBar(min=0, max=0, label=f"tile {number} of {count}"))
+        bars.visible = True
 
     # -- environment building --------------------------------------------
 
@@ -734,11 +767,16 @@ class OpsPanel(Container):
         self, message: str | None, current: int | None, maximum: int | None
     ) -> None:
         try:
+            # In a tiled run, the op's own progress is the current tile's.
+            bar = self._tile_bars[-1] if self._tile else self._progress
             if maximum:
-                self._progress.max = maximum
-                self._progress.value = current or 0
+                bar.max = maximum
+                bar.value = current or 0
             if message:
-                self._status.value = message
+                where = (
+                    f"Tile {self._tile[0]} of {self._tile[1]}: " if self._tile else ""
+                )
+                self._status.value = where + message
         except RuntimeError:
             # The panel was closed while its op was still running, so the Qt
             # objects behind these widgets are gone. The op carries on in its
@@ -844,6 +882,9 @@ class OpsPanel(Container):
         self._cancel.enabled = True
         self._cancel.text = "Cancel"
         self._progress.visible = False
+        self._tile_bars.clear()
+        self._tile_bars.visible = False
+        self._tile = None
         self._status.visible = False
         self._status.value = ""
         self.finished.emit()

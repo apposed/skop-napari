@@ -745,3 +745,23 @@ def test_a_tiled_run_on_a_zarr_writes_a_zarr(panel, qtbot, tmp_path):
 
     whole = panel._runner.run(gaussian, image=data, memory="off")
     np.testing.assert_allclose(result.data[:], whole, rtol=0, atol=1e-5)
+
+
+def test_a_tiled_run_shows_a_bar_for_each_of_its_last_few_tiles(panel):
+    def tile(number):
+        panel._on_progress(f"Tile {number} of 6", number - 1, 6, (number, 6))
+        panel._on_progress("Iteration 1 of 2", 1, 2)
+
+    for number in range(1, 5):
+        tile(number)
+    assert [bar.label for bar in panel._tile_bars] == [
+        f"tile {n} of 6" for n in range(1, 5)
+    ]
+    # The four are full, so tile 5 starts again with a bar of its own.
+    tile(5)
+    assert [bar.label for bar in panel._tile_bars] == ["tile 5 of 6"]
+    assert (panel._tile_bars[-1].value, panel._tile_bars[-1].max) == (1, 2)
+    assert (panel._progress.value, panel._progress.max) == (4, 6)
+    assert panel._status.value == "Tile 5 of 6: Iteration 1 of 2"
+    panel._on_finish()
+    assert len(panel._tile_bars) == 0
