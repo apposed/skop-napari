@@ -33,6 +33,7 @@ from magicgui.widgets import (
 )
 from napari.layers import Layer
 from napari.utils.notifications import notification_manager, show_error
+from opspec.tiling import TilePlan, parse_bytes, plan_tiles
 from psygnal import Signal
 from superqt.utils import ensure_main_thread
 
@@ -160,6 +161,10 @@ class OpsPanel(Container):
             else Runner(debug=bool(os.environ.get("SKOP_NAPARI_DEBUG")))
         )
         self._run: OpRun | None = None
+        # How the chosen op would be tiled under the memory budget, if at all,
+        # and what is wrong with the budget, if anything.
+        self._tile_plan: TilePlan | None = None
+        self._tile_problem: str | None = None
 
         self._specs, self._failures = discover()
         self._by_label = {
@@ -183,6 +188,21 @@ class OpsPanel(Container):
         # already shows. Empty for an ordinary op.
         self._stages_box = Container(labels=False)
         self._adapt = Adaptations()
+        # A memory budget, offered only for ops that say how they can be cut
+        # up (@op(tile=..., peak_memory=...)). Over it, the op runs tile by
+        # tile; under it, or with the box empty, it runs whole as always.
+        self._memory = LineEdit(
+            name="memory",
+            label="memory budget",
+            value="",
+            tooltip=(
+                "Run the op in tiles that each fit this much memory, e.g. "
+                "500M or 2G. Empty: run it whole."
+            ),
+        )
+        # The panel is built with labels=False; this box draws the label.
+        self._memory_box = Container(labels=True, widgets=[self._memory], visible=False)
+        self._tiles = Label(value="", visible=False)
         # How to show a mask collection. A display choice rather than an op
         # parameter: nothing about it reaches the model, and re-showing a
         # result a different way should not mean running SAM again. Hidden
@@ -228,6 +248,8 @@ class OpsPanel(Container):
                 self._inputs_box,
                 self._stages_box,
                 self._adapt,
+                self._memory_box,
+                self._tiles,
                 self._mask_view,
                 self._z_spacing,
                 self._notes,
@@ -243,6 +265,7 @@ class OpsPanel(Container):
         self._mask_view.changed.connect(self._show_z_spacing)
         self._button.changed.connect(self._start)
         self._cancel.changed.connect(self._stop)
+        self._memory.changed.connect(self._replan)
 
         # "Current position" means the position right now, not the one that
         # happened to be showing when the op was picked. Without this the
@@ -293,13 +316,19 @@ class OpsPanel(Container):
 
         self._mask_view.visible = self._makes_masks()
         self._show_z_spacing()
+        self._memory_box.visible = bool(spec.tile and spec.peak_memory)
 
         adaptable = self._adapt.rebuild(spec)
         # Which array is selected decides what can be done with it, so the
         # adaptation rows follow the layer combos rather than being computed
         # once. The rows themselves also re-plan when their axes are edited.
+        # The tile line follows the input being tiled, and whichever
+        # parameter sizes the overlap.
+        watched = set(adaptable) | set(spec.tile)
+        if spec.overlap and spec.overlap.param:
+            watched.add(spec.overlap.param)
         for widget in self._inputs.widgets:
-            if widget.name in adaptable:
+            if widget.name in watched:
                 widget.changed.connect(self._replan)
         self._adapt.watch(self._replan)
         self._replan()
@@ -325,8 +354,15 @@ class OpsPanel(Container):
     def _replan(self) -> None:
         """Re-resolve axes and re-plan, then say whether the op can run."""
         self._adapt.refresh(resolve(self.spec), self._inputs.values(), self._viewer)
+        self._tile_plan, self._tile_problem = self._plan_tiles()
+        self._tiles.value = self._tile_plan.summary if self._tile_plan else ""
+        self._tiles.visible = self._tile_plan is not None
         self._notes.value = self._notes_for(self._inputs, self.spec)
-        self._button.enabled = self._inputs.runnable and not self._adapt.problems
+        self._button.enabled = (
+            self._inputs.runnable
+            and not self._adapt.problems
+            and not self._tile_problem
+        )
 
     def _moved(self) -> None:
         """Re-plan when the viewer's sliders move, if that changes anything.
@@ -356,11 +392,50 @@ class OpsPanel(Container):
             notes.append(f"Cannot run: no widget for required input(s) {names}")
         notes.extend(note for stage in inputs.extra for note in stage.notes())
         notes.extend(f"Cannot run: {problem}" for problem in self._adapt.problems)
+        if self._tile_problem:
+            notes.append(f"Cannot run: memory budget: {self._tile_problem}")
         # Warnings never block a run. An op fed an axis it did not ask for is
         # the user's call to make; the panel's job is to make sure it is a
         # call they can see themselves making.
         notes.extend(f"Check: {warning}" for warning in self._adapt.warnings)
         return "\n".join(notes)
+
+    def _budget(self) -> str | None:
+        """The memory budget to run with, or None to run whole.
+
+        Decided from the op, not from ``self._memory_box.visible``: that reads
+        Qt's visibility, which is False whenever the panel is not on screen.
+        """
+        spec = self.spec
+        if not (spec.tile and spec.peak_memory) or self._tile_problem:
+            return None
+        return self._memory.value.strip() or None
+
+    def _plan_tiles(self) -> tuple[TilePlan | None, str | None]:
+        """How the chosen op would be tiled under the budget, or why it can't.
+
+        The same arithmetic the runner does (opspec.tiling), done here so the
+        panel can say "8 tiles" before anything runs.
+        """
+        spec = self.spec
+        text = self._memory.value.strip()
+        if not (spec.tile and spec.peak_memory and text):
+            return None, None
+        try:
+            budget = parse_bytes(text)
+        except ValueError as exc:
+            return None, str(exc)
+        values = {p.name: p.default for p in spec.params if not p.required}
+        values.update(self._inputs.values())
+        data = values.get(spec.tile[0])
+        if not (hasattr(data, "shape") and hasattr(data, "dtype")):
+            return None, None  # No layer chosen yet, or a pyramid.
+        try:
+            overlap = spec.overlap.resolve(values) if spec.overlap else 0
+            plan = plan_tiles(data.shape, data.dtype, spec.peak_memory, budget, overlap)
+        except ValueError as exc:
+            return None, str(exc)
+        return plan, None
 
     # -- running ---------------------------------------------------------
 
@@ -400,11 +475,16 @@ class OpsPanel(Container):
             calls = max(plan.calls for plan in plans.values())
             self._progress.label = f"Preparing environment: {spec.env} ({calls} runs)"
 
+        memory = self._budget()
+        if memory and self._tile_plan and self._tile_plan.calls > 1:
+            _log.info("Tiling to fit %s: %s", memory, self._tile_plan.summary)
+
         self._run = OpRun(
             self._runner,
             spec,
             args,
             plans=plans,
+            memory=memory,
             on_progress=self._on_progress,
             on_done=self._on_done,
             on_error=self._on_error,

@@ -647,3 +647,48 @@ def test_the_spacing_spinner_follows_the_view_chooser(panel):
 
     panel._mask_view.value = "2D labels (largest object on top)"
     assert panel._z_spacing._explicitly_hidden
+
+
+# -- tiling to a memory budget -----------------------------------------------
+
+
+def _choose_op(panel, name):
+    """Choose an op by its full name, for a function name shared by two."""
+    panel._picker.value = next(
+        label for label, spec in panel._by_label.items() if spec.name == name
+    )
+
+
+def test_only_ops_that_can_be_tiled_offer_a_memory_budget(panel):
+    # On magicgui's intent flag, not .visible: see the mask view test above.
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    assert not panel._memory_box._explicitly_hidden
+    _choose(panel, "quadrants")
+    assert panel._memory_box._explicitly_hidden
+
+
+def test_a_budget_that_cannot_work_blocks_the_run(panel):
+    panel._viewer.add_image(np.zeros((24, 60, 80), dtype=np.uint8), name="volume")
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    panel._memory.value = "lots"
+    assert not panel._button.enabled
+    assert "Cannot run: memory budget" in panel._notes.value
+    panel._memory.value = ""
+    assert panel._button.enabled
+
+
+def test_a_memory_budget_runs_the_op_in_tiles(panel, qtbot):
+    data = np.random.default_rng(0).integers(0, 255, (24, 60, 80)).astype(np.uint8)
+    panel._viewer.add_image(data, name="volume")
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    panel._memory.value = "200K"
+    # Said before anything runs, so the user knows what they are getting.
+    assert not panel._tiles._explicitly_hidden
+    assert panel._tiles.value.endswith("overlap 4")
+    assert int(panel._tiles.value.split()[0]) > 1
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
+    result = next(layer for layer in panel._viewer.layers if "gaussian" in layer.name)
+    assert result.data.shape == data.shape

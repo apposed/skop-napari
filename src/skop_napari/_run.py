@@ -38,6 +38,7 @@ class OpRun:
         kwargs: dict[str, Any],
         *,
         plans: dict[str, Any] | None = None,
+        memory: int | str | None = None,
         on_progress: Callable[[str | None, int | None, int | None], None],
         on_done: Callable[[Any], None],
         on_error: Callable[[Exception], None],
@@ -69,6 +70,7 @@ class OpRun:
                 fn,
                 kwargs,
                 plans=plans or None,
+                memory=memory,
                 on_progress=report,
                 on_start=self._started,
             )
