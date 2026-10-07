@@ -157,10 +157,15 @@ class _Row(Container):
                 # spatial slots at whatever is on screen. Re-planned rather
                 # than patched, because the mapping decides what is left over
                 # and hence what the dispositions apply to.
+                # napari does not count an RGB layer's colour axis as a
+                # dimension, so it is never on screen; leave it out, or the
+                # viewer's two axes land on the last two, x and colour.
+                layer = _axes.layer_for(viewer, data)
+                rgb = bool(getattr(layer, "rgb", False))
                 guided = _guided(
                     plan.mapping,
                     self.param.axes.slots,
-                    _axes.displayed(viewer, len(axes)),
+                    _axes.displayed(viewer, len(axes) - rgb),
                     len(axes),
                 )
                 if guided != plan.mapping:

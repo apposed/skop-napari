@@ -43,7 +43,7 @@ from skop import OpSpec, Role, Runner, discover
 from skop._tiling import DEFAULT_FRACTION, default_budget
 from skop.runner import tile_plan
 
-from ._axes import METADATA_KEY
+from ._axes import METADATA_KEY, layer_for
 from ._choices import is_workflow_plumbing, stages_for
 from ._plans import Adaptations
 from ._roles import (
@@ -114,6 +114,24 @@ def _describe(value: Any) -> str:
     if shape is not None:
         return f"{type(value).__name__}{tuple(shape)} {getattr(value, 'dtype', '')}"
     return repr(value)
+
+
+def _follow(layer: Layer, source: Layer | None) -> None:
+    """Put an output where its input is: the same scale and offset.
+
+    An op works in the input's pixels, so its boxes and labels come back in
+    them. A layer shown at 8x scale -- level 3 of a pyramid, say -- would
+    otherwise get its outputs drawn at 1x, squeezed into the top-left corner.
+    An output with more dimensions than its input (a stack of masks) is
+    unscaled along the extra, leading ones.
+    """
+    if source is None:
+        return
+    extra = max(0, layer.ndim - source.ndim)
+    scale = tuple(source.scale)[-layer.ndim :]
+    translate = tuple(source.translate)[-layer.ndim :]
+    layer.scale = (1.0,) * extra + scale
+    layer.translate = (0.0,) * extra + translate
 
 
 def _zarr_out_for(data: Any, plan: TilePlan) -> Any:
@@ -277,6 +295,9 @@ class OpsPanel(Container):
         self._notes = Label(value="")
         self._button = PushButton(text="Run")
         self._cancel = PushButton(text="Cancel", visible=False)
+        # The op's progress messages. Not the bar's own label: this panel is
+        # built with labels=False, so magicgui never draws that.
+        self._status = Label(value="", visible=False)
         self._progress = ProgressBar(visible=False, min=0, max=0)
         self._results = Container(labels=True, visible=False)
 
@@ -294,6 +315,7 @@ class OpsPanel(Container):
                 self._notes,
                 self._button,
                 self._cancel,
+                self._status,
                 self._progress,
                 self._results,
             ],
@@ -501,16 +523,26 @@ class OpsPanel(Container):
         self._button.enabled = False
         self._cancel.visible = True
         self._progress.visible = True
+        self._status.visible = True
         self._progress.max = 0  # Indeterminate until the op says otherwise.
         # There is no "build started" event, and a first run can sit silent
         # for a while before pixi says anything, so say something ourselves.
-        self._progress.label = (
+        self._status.value = (
             "Starting workflow"
             if spec.is_workflow
             else f"Preparing environment: {spec.env}"
         )
 
         args = self._inputs.values()
+        # The first input that is a layer; outputs are drawn where it is.
+        self._source_layer = next(
+            (
+                layer
+                for w in self._inputs.widgets
+                if (layer := layer_for(self._viewer, w.value)) is not None
+            ),
+            None,
+        )
         # Frozen for the duration of the run: the user is free to change the
         # selection while it works, and the outputs still belong to the plan
         # that produced them.
@@ -525,7 +557,7 @@ class OpsPanel(Container):
         )
         if any(plan.calls > 1 for plan in plans.values()):
             calls = max(plan.calls for plan in plans.values())
-            self._progress.label = f"Preparing environment: {spec.env} ({calls} runs)"
+            self._status.value = f"Preparing environment: {spec.env} ({calls} runs)"
 
         memory = self._budget()
         out = None
@@ -593,7 +625,7 @@ class OpsPanel(Container):
                 self._progress.max = maximum
                 self._progress.value = current or 0
             if message:
-                self._progress.label = message
+                self._status.value = message
         except RuntimeError:
             # The panel was closed while its op was still running, so the Qt
             # objects behind these widgets are gone. The op carries on in its
@@ -633,7 +665,9 @@ class OpsPanel(Container):
                 )
                 args = self._layer_args(name, data)
                 args.update(extra)
-                self._viewer.add_layer(Layer.create(data, args, layer_type))
+                layer = Layer.create(data, args, layer_type)
+                _follow(layer, getattr(self, "_source_layer", None))
+                self._viewer.add_layer(layer)
 
         self._show_scalars(scalars)
 
@@ -697,7 +731,8 @@ class OpsPanel(Container):
         self._cancel.enabled = True
         self._cancel.text = "Cancel"
         self._progress.visible = False
-        self._progress.label = ""
+        self._status.visible = False
+        self._status.value = ""
         self.finished.emit()
 
 

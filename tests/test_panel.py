@@ -167,7 +167,7 @@ def test_progress_reaches_the_panel_and_cancel_stops_the_op(panel, qtbot):
         # Progress is reported from the worker process, relayed by an Appose
         # listener thread, and must arrive on the GUI thread to be shown.
         qtbot.waitUntil(
-            lambda: "Summing chunk" in (panel._progress.label or ""),
+            lambda: "Summing chunk" in (panel._status.value or ""),
             timeout=120_000,
         )
         assert panel._run is not None
@@ -207,7 +207,7 @@ def test_build_progress_drives_the_progress_bar(panel):
     # PixiInstallMonitor reports determinate progress per phase. These are
     # the real titles it emits, in order.
     panel._on_build_progress("Installing conda packages", 0, 30)
-    assert panel._progress.label == "Installing conda packages"
+    assert panel._status.value == "Installing conda packages"
     assert panel._progress.max == 30
 
     panel._on_build_progress("Installing conda packages", 21, 30)
@@ -222,12 +222,12 @@ def test_build_log_noise_is_logged_but_not_shown(panel, caplog):
             "DEBUG pixi_config: Loading config from /etc/pixi/config.toml\n"
             " INFO pixi_core::lock_file::update: Installed environment\n"
         )
-    assert panel._progress.label == ""
+    assert panel._status.value == ""
     assert "pixi_config" in caplog.text  # Still recoverable from the log.
 
     # A human-facing line does reach the bar.
     panel._on_build_text("✔ The default environment has been installed.\n")
-    assert panel._progress.label == "✔ The default environment has been installed."
+    assert panel._status.value == "✔ The default environment has been installed."
 
 
 def test_build_callbacks_are_registered_on_the_runner(panel):
@@ -244,7 +244,7 @@ def test_build_text_crosses_from_the_build_thread_to_the_gui(panel, qtbot):
     subscriber = panel._runner._build_error[0]
     threading.Thread(target=subscriber, args=("✔ installed\n",)).start()
 
-    qtbot.waitUntil(lambda: panel._progress.label == "✔ installed", timeout=10_000)
+    qtbot.waitUntil(lambda: panel._status.value == "✔ installed", timeout=10_000)
 
 
 # -- axis awareness --------------------------------------------------------
