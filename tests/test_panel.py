@@ -692,3 +692,16 @@ def test_a_memory_budget_runs_the_op_in_tiles(panel, qtbot):
 
     result = next(layer for layer in panel._viewer.layers if "gaussian" in layer.name)
     assert result.data.shape == data.shape
+
+
+def test_an_empty_budget_is_the_default_and_off_runs_whole(panel):
+    panel._viewer.add_image(np.zeros((24, 60, 80), dtype=np.uint8), name="volume")
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    # Empty: the runner's default, shown in the box. A small volume fits it,
+    # so there is nothing to say about tiles.
+    assert panel._memory.native.placeholderText().startswith("auto: ")
+    assert panel._tiles._explicitly_hidden
+    assert panel._budget() is None
+    panel._memory.value = "off"
+    assert panel._budget() == "off"
+    assert panel._tiles._explicitly_hidden

@@ -33,11 +33,13 @@ from magicgui.widgets import (
 )
 from napari.layers import Layer
 from napari.utils.notifications import notification_manager, show_error
-from opspec.tiling import TilePlan, parse_bytes, plan_tiles
+from opspec.tiling import TilePlan, parse_bytes
 from psygnal import Signal
 from superqt.utils import ensure_main_thread
 
 from skop import OpSpec, Role, Runner, discover
+from skop._tiling import DEFAULT_FRACTION, default_budget
+from skop.runner import tile_plan
 
 from ._axes import METADATA_KEY
 from ._choices import is_workflow_plumbing, stages_for
@@ -110,6 +112,14 @@ def _describe(value: Any) -> str:
     if shape is not None:
         return f"{type(value).__name__}{tuple(shape)} {getattr(value, 'dtype', '')}"
     return repr(value)
+
+
+def _size(n: int) -> str:
+    """Bytes as a size someone would type: 19.3G, 850M."""
+    for unit, scale in (("T", 1024**4), ("G", 1024**3), ("M", 1024**2)):
+        if n >= scale:
+            return f"{n / scale:.1f}{unit}"
+    return f"{n // 1024}K"
 
 
 def _layer_name(spec: OpSpec, output: str) -> str:
@@ -197,7 +207,8 @@ class OpsPanel(Container):
             value="",
             tooltip=(
                 "Run the op in tiles that each fit this much memory, e.g. "
-                "500M or 2G. Empty: run it whole."
+                "500M or 2G. Empty: 85% of the memory free right now, which "
+                "only tiles an input too big for it. 'off': always run whole."
             ),
         )
         # The panel is built with labels=False; this box draws the label.
@@ -354,6 +365,11 @@ class OpsPanel(Container):
     def _replan(self) -> None:
         """Re-resolve axes and re-plan, then say whether the op can run."""
         self._adapt.refresh(resolve(self.spec), self._inputs.values(), self._viewer)
+        if self.spec.tile and self.spec.peak_memory:
+            self._memory.native.setPlaceholderText(
+                f"auto: {_size(default_budget())} "
+                f"({DEFAULT_FRACTION:.0%} of free memory)"
+            )
         self._tile_plan, self._tile_problem = self._plan_tiles()
         self._tiles.value = self._tile_plan.summary if self._tile_plan else ""
         self._tiles.visible = self._tile_plan is not None
@@ -409,32 +425,40 @@ class OpsPanel(Container):
         spec = self.spec
         if not (spec.tile and spec.peak_memory) or self._tile_problem:
             return None
-        return self._memory.value.strip() or None
+        text = self._memory.value.strip()
+        # Empty is the runner's own default, which it works out at run time.
+        return "off" if text.lower() == "off" else (text or None)
 
     def _plan_tiles(self) -> tuple[TilePlan | None, str | None]:
-        """How the chosen op would be tiled under the budget, or why it can't.
+        """How the chosen op would be tiled, or why it can't be.
 
-        The same arithmetic the runner does (opspec.tiling), done here so the
-        panel can say "8 tiles" before anything runs.
+        Asked of the runner (``skop.runner.tile_plan``), so the panel says
+        what the run will actually do. An empty box is the runner's default
+        budget, shown in the box itself, and is mentioned here only when it
+        would cut the input up; "off" never tiles.
         """
         spec = self.spec
         text = self._memory.value.strip()
-        if not (spec.tile and spec.peak_memory and text):
+        if not (spec.tile and spec.peak_memory) or text.lower() == "off":
             return None, None
-        try:
-            budget = parse_bytes(text)
-        except ValueError as exc:
-            return None, str(exc)
+        if text:
+            try:
+                budget = parse_bytes(text)
+            except ValueError as exc:
+                return None, str(exc)
+        else:
+            budget = default_budget()
         values = {p.name: p.default for p in spec.params if not p.required}
         values.update(self._inputs.values())
         data = values.get(spec.tile[0])
         if not (hasattr(data, "shape") and hasattr(data, "dtype")):
             return None, None  # No layer chosen yet, or a pyramid.
         try:
-            overlap = spec.overlap.resolve(values) if spec.overlap else 0
-            plan = plan_tiles(data.shape, data.dtype, spec.peak_memory, budget, overlap)
+            plan = tile_plan(spec, values, budget)
         except ValueError as exc:
             return None, str(exc)
+        if not text and plan.calls == 1:
+            return None, None  # The default changes nothing; say nothing.
         return plan, None
 
     # -- running ---------------------------------------------------------
@@ -476,8 +500,12 @@ class OpsPanel(Container):
             self._progress.label = f"Preparing environment: {spec.env} ({calls} runs)"
 
         memory = self._budget()
-        if memory and self._tile_plan and self._tile_plan.calls > 1:
-            _log.info("Tiling to fit %s: %s", memory, self._tile_plan.summary)
+        if self._tile_plan and self._tile_plan.calls > 1:
+            _log.info(
+                "Tiling to fit %s: %s",
+                memory or "the default budget",
+                self._tile_plan.summary,
+            )
 
         self._run = OpRun(
             self._runner,
