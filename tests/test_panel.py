@@ -684,7 +684,7 @@ def test_a_memory_budget_runs_the_op_in_tiles(panel, qtbot):
     panel._memory.value = "200K"
     # Said before anything runs, so the user knows what they are getting.
     assert not panel._tiles._explicitly_hidden
-    assert panel._tiles.value.endswith("overlap 4")
+    assert "overlap 4;" in panel._tiles.value
     assert int(panel._tiles.value.split()[0]) > 1
 
     with qtbot.waitSignal(panel.finished, timeout=300_000):
@@ -696,17 +696,33 @@ def test_a_memory_budget_runs_the_op_in_tiles(panel, qtbot):
     assert type(result.data).__module__.split(".")[0] != "zarr"
 
 
-def test_an_empty_budget_is_the_default_and_off_runs_whole(panel):
+def test_the_plan_is_shown_even_for_one_tile_and_off_hides_it(panel):
     panel._viewer.add_image(np.zeros((24, 60, 80), dtype=np.uint8), name="volume")
     _choose_op(panel, "skop.ops.smooth:gaussian")
-    # Empty: the runner's default, shown in the box. A small volume fits it,
-    # so there is nothing to say about tiles.
+    # Empty: the runner's default, shown in the box; a small volume is one
+    # tile, and the line still says what it needs.
     assert panel._memory.native.placeholderText().startswith("auto: ")
-    assert panel._tiles._explicitly_hidden
-    assert panel._budget() is None
+    assert not panel._tiles._explicitly_hidden
+    assert panel._tiles.value.startswith("1 tile")
+    assert "needs" in panel._tiles.value
     panel._memory.value = "off"
-    assert panel._budget() == "off"
     assert panel._tiles._explicitly_hidden
+    assert not panel._tiler()[0].enabled
+
+
+def test_tile_size_and_overlap_can_be_set_by_hand(panel):
+    panel._viewer.add_image(np.zeros((24, 60, 80), dtype=np.uint8), name="volume")
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    # What the budget would choose is shown in the empty fields.
+    assert panel._tile_size.native.placeholderText().startswith("auto: ")
+    panel._tile_size.value = "24 30 40"
+    panel._overlap.value = "2"
+    assert panel._tile_plan.tile_shape == (24, 30, 40)
+    assert panel._tile_plan.overlap == 2
+    assert panel._tiles.value.startswith("4 tiles")
+    panel._tile_size.value = "30 40"
+    assert not panel._button.enabled
+    assert "tile size needs 3 numbers" in panel._notes.value
 
 
 def test_a_tiled_run_on_a_zarr_writes_a_zarr(panel, qtbot, tmp_path):

@@ -40,8 +40,7 @@ from psygnal import Signal
 from superqt.utils import ensure_main_thread
 
 from skop import OpSpec, Role, Runner, discover
-from skop._tiling import DEFAULT_FRACTION, default_budget
-from skop.runner import tile_plan
+from skop._tiling import DEFAULT_FRACTION, Tiler, default_budget
 
 from ._axes import METADATA_KEY, layer_for
 from ._choices import is_workflow_plumbing, stages_for
@@ -160,6 +159,43 @@ def _zarr_out_for(data: Any, plan: TilePlan) -> Any:
     return make
 
 
+#: The overlap a workflow's plan is estimated with when the field is empty.
+#: The op's own overlap may come from a PSF the workflow makes partway
+#: through, after the panel has planned. The run uses the op's own, from the
+#: real PSF. 10 is what clij2-fft and tnia-python use.
+WORKFLOW_OVERLAP = 10
+
+
+def _tile_line(plan: TilePlan) -> str:
+    """The plan in one line: how many tiles, and what each needs."""
+    line = f"{plan.summary}; needs {_size(plan.peak)} of {_size(plan.budget)}"
+    return line + " -- over the budget" if plan.peak > plan.budget else line
+
+
+def _numbers(text: str) -> tuple[int, ...] | None:
+    """Whole numbers typed into a field, "64 256 256" or "64x256x256"; None if empty."""
+    parts = text.replace("x", " ").replace(",", " ").split()
+    if not parts:
+        return None
+    try:
+        return tuple(int(part) for part in parts)
+    except ValueError:
+        raise ValueError(f"not whole numbers: {text.strip()!r}") from None
+
+
+def _budget_from(text: str) -> float | int | None:
+    """A memory budget as typed: empty, a share of what is free, or a size."""
+    if not text:
+        return None
+    try:
+        share = float(text)
+    except ValueError:
+        return parse_bytes(text)
+    if 0 < share <= 1:
+        return share
+    raise ValueError(f"a share of free memory is between 0 and 1, not {share}")
+
+
 def _size(n: int) -> str:
     """Bytes as a size someone would type: 19.3G, 850M."""
     for unit, scale in (("T", 1024**4), ("G", 1024**3), ("M", 1024**2)):
@@ -252,13 +288,38 @@ class OpsPanel(Container):
             label="memory budget",
             value="",
             tooltip=(
-                "Run the op in tiles that each fit this much memory, e.g. "
-                "500M or 2G. Empty: 85% of the memory free right now, which "
-                "only tiles an input too big for it. 'off': always run whole."
+                "Run the op in tiles that each fit this much memory: a size, "
+                "500M or 2G, or a share of what is free, 0.5. Empty: 85% of "
+                "the memory free right now, which only tiles an input too big "
+                "for it. 'off': always run whole."
             ),
         )
-        # The panel is built with labels=False; this box draws the label.
-        self._memory_box = Container(labels=True, widgets=[self._memory], visible=False)
+        # A Tiler's two overrides (0017 tiling.md, "The Tiler"). Empty, each
+        # shows what would be used, and follows the budget as it changes.
+        self._tile_size = LineEdit(
+            name="tile_size",
+            label="tile size",
+            value="",
+            tooltip=(
+                "The size of each tile, one number per axis, e.g. 64 256 256. "
+                "Empty: the largest that fits the budget."
+            ),
+        )
+        self._overlap = LineEdit(
+            name="overlap",
+            label="overlap",
+            value="",
+            tooltip=(
+                "How far each tile reaches into its neighbours, in pixels: one "
+                "number, or one per axis. Empty: the op's own."
+            ),
+        )
+        # The panel is built with labels=False; this box draws the labels.
+        self._memory_box = Container(
+            labels=True,
+            widgets=[self._memory, self._tile_size, self._overlap],
+            visible=False,
+        )
         self._tiles = Label(value="", visible=False)
         # How to show a mask collection. A display choice rather than an op
         # parameter: nothing about it reaches the model, and re-showing a
@@ -327,6 +388,8 @@ class OpsPanel(Container):
         self._button.changed.connect(self._start)
         self._cancel.changed.connect(self._stop)
         self._memory.changed.connect(self._replan)
+        self._tile_size.changed.connect(self._replan)
+        self._overlap.changed.connect(self._replan)
 
         # "Current position" means the position right now, not the one that
         # happened to be showing when the op was picked. Without this the
@@ -377,7 +440,6 @@ class OpsPanel(Container):
 
         self._mask_view.visible = self._makes_masks()
         self._show_z_spacing()
-        self._memory_box.visible = bool(spec.tile and spec.peak_memory)
 
         adaptable = self._adapt.rebuild(spec)
         # Which array is selected decides what can be done with it, so the
@@ -385,12 +447,16 @@ class OpsPanel(Container):
         # once. The rows themselves also re-plan when their axes are edited.
         # The tile line follows the input being tiled, and whichever
         # parameter sizes the overlap.
-        watched = set(adaptable) | set(spec.tile)
+        tiled = self._tiled()
+        watched = set(adaptable) | set(tiled[0].tile if tiled else ())
         if spec.overlap and spec.overlap.param:
             watched.add(spec.overlap.param)
         for widget in self._inputs.widgets:
             if widget.name in watched:
                 widget.changed.connect(self._replan)
+        # A workflow's choosers decide which op is tiled, and on which device.
+        for stage in self._inputs.extra:
+            stage.changed.connect(self._replan)
         self._adapt.watch(self._replan)
         self._replan()
 
@@ -415,14 +481,37 @@ class OpsPanel(Container):
     def _replan(self) -> None:
         """Re-resolve axes and re-plan, then say whether the op can run."""
         self._adapt.refresh(resolve(self.spec), self._inputs.values(), self._viewer)
-        if self.spec.tile and self.spec.peak_memory:
+        tiled = self._tiled()
+        self._memory_box.visible = tiled is not None
+        if tiled:
+            device = tiled[0].peak_memory.device
+            free = "GPU memory" if device == "gpu" else "free memory"
+            budget = default_budget(DEFAULT_FRACTION, device)
             self._memory.native.setPlaceholderText(
-                f"auto: {_size(default_budget())} "
-                f"({DEFAULT_FRACTION:.0%} of free memory)"
+                f"auto: {_size(budget)} ({DEFAULT_FRACTION:.0%} of {free})"
+                if budget is not None
+                else f"auto: {free} unknown, so not tiled"
             )
         self._tile_plan, self._tile_problem = self._plan_tiles()
-        self._tiles.value = self._tile_plan.summary if self._tile_plan else ""
-        self._tiles.visible = self._tile_plan is not None
+        plan = self._tile_plan
+        self._tiles.value = _tile_line(plan) if plan else ""
+        if plan and self.spec.is_workflow:
+            self._tiles.value += " (estimated: the PSF is made when it runs)"
+        self._tiles.visible = plan is not None
+        if plan is not None:
+            # What would be used, in the fields the user has left empty.
+            self._tile_size.native.setPlaceholderText(
+                "auto: " + " x ".join(str(n) for n in plan.tile_shape)
+            )
+            reach = plan.overlap
+            self._overlap.native.setPlaceholderText(
+                "auto: "
+                + (
+                    " x ".join(str(n) for n in reach)
+                    if isinstance(reach, tuple)
+                    else str(reach)
+                )
+            )
         self._notes.value = self._notes_for(self._inputs, self.spec)
         self._button.enabled = (
             self._inputs.runnable
@@ -466,50 +555,76 @@ class OpsPanel(Container):
         notes.extend(f"Check: {warning}" for warning in self._adapt.warnings)
         return "\n".join(notes)
 
-    def _budget(self) -> str | None:
-        """The memory budget to run with, or None to run whole.
+    def _tiler(self, estimate: bool = False) -> tuple[Tiler | None, str | None]:
+        """The Tiler the three fields describe, or what is wrong with them.
 
-        Decided from the op, not from ``self._memory_box.visible``: that reads
-        Qt's visibility, which is False whenever the panel is not on screen.
+        With *estimate*, for showing a workflow's plan before it runs: an
+        empty overlap is WORKFLOW_OVERLAP.
+        """
+        text = self._memory.value.strip()
+        if text.lower() == "off":
+            return Tiler.off(), None
+        try:
+            memory = _budget_from(text)
+            tile_size = _numbers(self._tile_size.value)
+            overlap = _numbers(self._overlap.value)
+        except ValueError as exc:
+            return None, str(exc)
+        if overlap is not None and len(overlap) == 1:
+            overlap = overlap[0]
+        if overlap is None and estimate and self.spec.is_workflow:
+            overlap = WORKFLOW_OVERLAP
+        return Tiler(memory=memory, overlap=overlap, tile_shape=tile_size), None
+
+    def _tiled(self) -> tuple[OpSpec, dict[str, Any]] | None:
+        """The op that may be tiled, and its arguments as the panel has them.
+
+        The chosen op, or for a workflow, the op one of its choosers picked
+        that declares tiling hints. A workflow passes its own inputs to that
+        op by name, so the workflow's image is the one tiled.
         """
         spec = self.spec
-        if not (spec.tile and spec.peak_memory) or self._tile_problem:
-            return None
-        text = self._memory.value.strip()
-        # Empty is the runner's own default, which it works out at run time.
-        return "off" if text.lower() == "off" else (text or None)
+        own = self._inputs.values()
+        if spec.tile and spec.peak_memory:
+            values = {p.name: p.default for p in spec.params if not p.required}
+            return spec, {**values, **own}
+        for stage in self._inputs.extra:
+            sub = stage.spec
+            if sub.tile and sub.peak_memory:
+                values = {p.name: p.default for p in sub.params if not p.required}
+                values.update(stage.values())
+                values.update({name: own[name] for name in sub.tile if name in own})
+                return sub, values
+        return None
 
     def _plan_tiles(self) -> tuple[TilePlan | None, str | None]:
         """How the chosen op would be tiled, or why it can't be.
 
-        Asked of the runner (``skop.runner.tile_plan``), so the panel says
-        what the run will actually do. An empty box is the runner's default
-        budget, shown in the box itself, and is mentioned here only when it
-        would cut the input up; "off" never tiles.
+        Asked of the same Tiler the run is given, so the panel says what the
+        run will do. Shown even when the whole input is one tile, so the user
+        sees what it needs. None when the op cannot be tiled, tiling is off,
+        or the budget for its device is not known.
         """
-        spec = self.spec
-        text = self._memory.value.strip()
-        if not (spec.tile and spec.peak_memory) or text.lower() == "off":
+        tiled = self._tiled()
+        if tiled is None:
             return None, None
-        if text:
-            try:
-                budget = parse_bytes(text)
-            except ValueError as exc:
-                return None, str(exc)
-        else:
-            budget = default_budget()
-        values = {p.name: p.default for p in spec.params if not p.required}
-        values.update(self._inputs.values())
+        spec, values = tiled
+        tiler, problem = self._tiler(estimate=True)
+        if problem:
+            return None, problem
         data = values.get(spec.tile[0])
         if not (hasattr(data, "shape") and hasattr(data, "dtype")):
             return None, None  # No layer chosen yet, or a pyramid.
+        for name, given in (
+            ("tile size", tiler.tile_shape),
+            ("overlap", tiler.overlap),
+        ):
+            if isinstance(given, tuple) and len(given) != data.ndim:
+                return None, f"{name} needs {data.ndim} numbers, one per axis"
         try:
-            plan = tile_plan(spec, values, budget)
+            return tiler.plan(spec, values), None
         except ValueError as exc:
             return None, str(exc)
-        if not text and plan.calls == 1:
-            return None, None  # The default changes nothing; say nothing.
-        return plan, None
 
     # -- running ---------------------------------------------------------
 
@@ -559,22 +674,20 @@ class OpsPanel(Container):
             calls = max(plan.calls for plan in plans.values())
             self._status.value = f"Preparing environment: {spec.env} ({calls} runs)"
 
-        memory = self._budget()
+        tiler = self._tiler()[0] if self._tiled() else None
         out = None
         if self._tile_plan and self._tile_plan.calls > 1:
-            _log.info(
-                "Tiling to fit %s: %s",
-                memory or "the default budget",
-                self._tile_plan.summary,
-            )
-            out = _zarr_out_for(args.get(spec.tile[0]), self._tile_plan)
+            _log.info("Tiling: %s", _tile_line(self._tile_plan))
+            # A workflow returns several results; only an op's one goes to out.
+            if not spec.is_workflow:
+                out = _zarr_out_for(args.get(spec.tile[0]), self._tile_plan)
 
         self._run = OpRun(
             self._runner,
             spec,
             args,
             plans=plans,
-            memory=memory,
+            tiler=tiler,
             out=out,
             on_progress=self._on_progress,
             on_done=self._on_done,
